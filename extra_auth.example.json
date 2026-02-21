@@ -1,0 +1,22 @@
+{
+  "fenxi": {
+    "cookies": {
+      "JSESSIONID": "<REDACTED>",
+      "e_token": "<REDACTED>"
+    },
+    "headers": {
+      "mediaids": "<REDACTED>",
+      "topic": "<REDACTED>"
+    },
+    "bootstrap_url": ""
+  },
+  "505": {
+    "cookies": {
+      "PHPSESSID": "<REDACTED>",
+      "__MANAGE_UID": "<REDACTED>",
+      "__MANAGE_USER": "<REDACTED>"
+    },
+    "headers": {},
+    "bootstrap_url": ""
+  }
+}

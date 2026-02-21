@@ -1,0 +1,144 @@
+# Public example config (safe to commit)
+# Copy to config.yaml for local use.
+
+# 870 data endpoint (replace with your own internal endpoint)
+base_url: "http://<YOUR_870_HOST>/?m=sdk&ac=getToolPre"
+
+# Local session cookie (do not commit real value)
+session_cookie: "PHPSESSID=<YOUR_SESSION_ID>"
+
+user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CodexReportBot/1.0"
+timeout: 30
+
+default_time_field: "ctime"
+default_http_method: "post"
+
+auto_query_params:
+  add_date_begin:
+    format: "%Y-%m-%d"
+    offset_days: 0
+
+generate_charts: true
+
+network:
+  proxy_mode: "direct"
+  http_proxy: ""
+  https_proxy: ""
+  hosts_yaml_path: "./hosts_870.yaml"
+
+targets:
+  total:
+    label: "总"
+    queries:
+      - params:
+          game_type: 0
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  page:
+    label: "页游"
+    queries:
+      - params:
+          game_type: 2
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  console:
+    label: "主机"
+    queries:
+      - params:
+          game_type: 3
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  mobile:
+    label: "手游"
+    queries:
+      - params:
+          game_type: 1
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  genshin:
+    label: "原神"
+    queries:
+      - params: { game_id: 1000001 }
+      - params: { game_id: 10000001 }
+      - params: { game_id: 80000001 }
+      - params: { game_id: 14100001 }
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  starrail:
+    label: "崩坏星穹铁道"
+    queries:
+      - params: { game_id: 10000563 }
+      - params: { game_id: 80000563 }
+      - params: { game_id: 50000358 }
+      - params: { game_id: 17000563 }
+      - params: { game_id: 14000563 }
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  zzz:
+    label: "绝区零"
+    queries:
+      - params: { game_id: 10000957 }
+      - params: { game_id: 17000957 }
+      - params: { game_id: 80000957 }
+      - params: { game_id: 14000957 }
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  high_quality:
+    label: "高画质"
+    queries:
+      - params:
+          pre_type: "s1_h8"
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+  pc_cloud:
+    label: "PC云游戏"
+    queries:
+      - params:
+          game_type: 7
+    concurrency_series_patterns: ["used_container_num_0"]
+    queue_series_patterns: ["line_member_num_0"]
+
+report_section_order: [total, page, console, mobile, genshin, starrail, zzz, high_quality, pc_cloud]
+
+analysis_groups:
+  - label: "手游"
+    members: ["genshin", "starrail", "zzz"]
+    top_n: 1
+    sentence_template: "手游排队以{items}为主。"
+    fallback: "手游排队无显著主导线路。"
+
+  - label: "主机"
+    members: []
+    top_n: 2
+    sentence_template: "主机排队以{items}为主。"
+    fallback: "主机排队无显著主导线路。"
+
+anomaly_rules:
+  # - source: "xxx"
+  #   metric: "queue"
+  #   hour_range: [2, 6]
+  #   min_value: 1
+  #   message_template: "{start_hour_cn}-{end_hour_cn}出现排队为{label}数据异常。"
+
+extra_metrics:
+  enabled: false
+  auth_file: "extra_auth.json"
+  timezone: "Asia/Shanghai"
+  request_timeout: 30
+  fenxi_base: "https://<FENXI_HOST>"
+  manage_base: "http://<MANAGE_HOST>"
+  query_proxy_url: ""
+  hosts_yaml_path: "./hosts_505.yaml"
+  fenxi_hars:
+    - "/path/to/fenxi_a.har"
+    - "/path/to/fenxi_b.har"
+  manage_hars:
+    - "/path/to/manage_505.har"

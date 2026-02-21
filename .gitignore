@@ -1,0 +1,24 @@
+__pycache__/
+.DS_Store
+
+# Runtime/output
+output/
+build/
+dist/
+*.log
+*.jsonl
+
+# Local env
+.venv/
+.venv_run/
+
+# Sensitive local config/auth
+config.yaml
+extra_auth.json
+extra_auth_*.json
+hosts_870.yaml
+hosts_505.yaml
+
+# Captured traffic and local debug
+*.har
+debug.txt

@@ -1,0 +1,48 @@
+{{ report_date_cn }}游戏盒云游戏数据
+  一、游戏盒云游戏相关数据日报
+  总并发最高峰值：{{ targets.total.concurrency.formatted_peak_value }}，时间：{{ targets.total.concurrency.peak_time_label }}。
+  总排队最高峰值：{{ targets.total.queue.formatted_peak_value }}，时间：{{ targets.total.queue.peak_time_label }}。
+  {{ targets.total.queue_summary }}
+{% for sentence in analysis_sentences %}
+  {{ sentence }}
+{% endfor -%}
+[总路线图片]
+  ——————————————————————
+  页游总并发峰值：{{ targets.page.concurrency.formatted_peak_value }}，时间：{{ targets.page.concurrency.peak_time_label }}。
+  {{ targets.page.queue_summary }}
+[页游图片]
+  ——————————————————————
+  主机总并发峰值：{{ targets.console.concurrency.formatted_peak_value }}，时间：{{ targets.console.concurrency.peak_time_label }}。
+  主机排队最高峰值：{{ targets.console.queue.formatted_peak_value }}，时间：{{ targets.console.queue.peak_time_label }}。
+  {{ targets.console.queue_summary }}
+[主机图片]
+  ——————————————————————
+  手游总并发峰值：{{ targets.mobile.concurrency.formatted_peak_value }}，时间：{{ targets.mobile.concurrency.peak_time_label }}。
+  手游排队最高峰值：{{ targets.mobile.queue.formatted_peak_value }}，时间：{{ targets.mobile.queue.peak_time_label }}。
+  {{ targets.mobile.queue_summary }}
+[手游图片]
+  ——————————————————————
+  原神总并发峰值：{{ targets.genshin.concurrency.formatted_peak_value }}，时间：{{ targets.genshin.concurrency.peak_time_label }}。
+  原神排队最高峰值：{{ targets.genshin.queue.formatted_peak_value }}，时间：{{ targets.genshin.queue.peak_time_label }}。
+  {{ targets.genshin.queue_summary }}
+[原神图片]
+  ——————————————————————
+  崩坏星穹铁道总并发峰值：{{ targets.starrail.concurrency.formatted_peak_value }}，时间：{{ targets.starrail.concurrency.peak_time_label }}。
+  崩坏星穹铁道排队最高峰值：{{ targets.starrail.queue.formatted_peak_value }}，时间：{{ targets.starrail.queue.peak_time_label }}。
+  {{ targets.starrail.queue_summary }}
+[星铁图片]
+  ——————————————————————
+  绝区零总并发峰值：{{ targets.zzz.concurrency.formatted_peak_value }}，时间：{{ targets.zzz.concurrency.peak_time_label }}。
+  绝区零排队最高峰值：{{ targets.zzz.queue.formatted_peak_value }}，时间：{{ targets.zzz.queue.peak_time_label }}。
+  {{ targets.zzz.queue_summary }}
+[绝区零图片]
+  ——————————————————————
+  高画质总并发峰值：{{ targets.high_quality.concurrency.formatted_peak_value }}，时间：{{ targets.high_quality.concurrency.peak_time_label }}。
+  高画质排队最高峰值：{{ targets.high_quality.queue.formatted_peak_value }}，时间：{{ targets.high_quality.queue.peak_time_label }}。
+  {{ targets.high_quality.queue_summary }}
+[高画质图片]
+  ——————————————————————
+  PC云游戏总并发峰值：{{ targets.pc_cloud.concurrency.formatted_peak_value }}，时间：{{ targets.pc_cloud.concurrency.peak_time_label }}。
+  PC云游戏总排队峰值：{{ targets.pc_cloud.queue.formatted_peak_value }}，时间：{{ targets.pc_cloud.queue.peak_time_label }}。
+  {{ targets.pc_cloud.queue_summary }}
+[pc云游戏图片]

@@ -28,10 +28,8 @@ import yaml
 from dateutil import parser as date_parser
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from extra_auth import build_extra_auth_file, load_extra_auth
-from extra_metrics_formatter import render_extra_metrics_block
-from extra_metrics_payment_images import render_payment_table_images
-from extra_metrics_service import ExtraMetricsService
-from extra_settings import ExtraSettings
+from extra_metrics_render import render_extra_metrics_block, render_payment_table_images
+from extra_metrics_service import ExtraMetricsService, ExtraSettings
 from network_hosts import load_hosts_map, rewrite_url_with_hosts_map
 
 

@@ -5,16 +5,51 @@ import random
 import re
 import time
 from copy import deepcopy
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from debug_log import DebugLogStore
-from extra_settings import ExtraSettings
 from network_hosts import load_hosts_map, rewrite_url_with_hosts_map
+
+
+@dataclass(frozen=True)
+class ExtraSettings:
+    timezone: str
+    request_timeout: int
+    query_proxy_url: str
+    hosts_yaml_path: str
+    query_debug_log_path: Path
+    fenxi_base: str
+    manage_base: str
+
+
+class DebugLogStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            self.path.write_text("", encoding="utf-8")
+
+    def write(self, event: dict[str, Any]) -> None:
+        item = dict(event)
+        item.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    def tail(self, lines: int = 200) -> list[dict[str, Any]]:
+        raw = self.path.read_text(encoding="utf-8").splitlines()
+        out = []
+        for row in raw[-max(1, lines):]:
+            try:
+                out.append(json.loads(row))
+            except json.JSONDecodeError:
+                continue
+        return out
 
 
 FENXI_MEDIA_ID = "media-eb40cb50d15a49a9"

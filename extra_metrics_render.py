@@ -74,7 +74,7 @@ def render_extra_metrics_block(extra_metrics: Dict[str, Any]) -> str:
 
     lines.append("4、充值明细：")
     lines.append(
-        "①、页游充值（工作web+厦门夜游）为：%s元，与上周同期对比%s。"
+        "①、页游充值为：%s元，与上周同期对比%s。"
         % (
             _fmt_num(notes.get("web_night_recharge")),
             _trend_delta_text(notes.get("web_night_recharge_week_delta")),
@@ -91,15 +91,6 @@ def render_extra_metrics_block(extra_metrics: Dict[str, Any]) -> str:
     if warnings:
         lines.append("备注：部分外部接口未取到数据 -> %s" % "；".join(str(w) for w in warnings))
 
-    if top_games:
-        lines.append("—————————————————————")
-        lines.append("二、云游戏活跃用户top(去重)")
-        lines.append("")
-        lines.append("| 游戏 | 活跃用户数 |")
-        lines.append("| :---: | :---: |")
-        for item in top_games:
-            lines.append("| %s | %s |" % (str(item.get("name") or "-"), _fmt_num(item.get("active_users"))))
-
     if isinstance(payment_images, dict) and payment_images:
         lines.append("")
         lines.append("具体：")
@@ -109,6 +100,16 @@ def render_extra_metrics_block(extra_metrics: Dict[str, Any]) -> str:
             lines.append(f"页游付费表图片：{page_img}")
         if mobile_img:
             lines.append(f"手游付费表图片：{mobile_img}")
+
+    if top_games:
+        lines.append("")
+        lines.append("—————————————————————")
+        lines.append("二、云游戏活跃用户top(去重)")
+        lines.append("")
+        lines.append("| 游戏 | 活跃用户数 |")
+        lines.append("| :---: | :---: |")
+        for item in top_games:
+            lines.append("| %s | %s |" % (str(item.get("name") or "-"), _fmt_num(item.get("active_users"))))
 
     return "\n".join(lines)
 

@@ -7,6 +7,8 @@ build/
 dist/
 *.log
 *.jsonl
+autodatareport-cli.spec
+autodatareport-gui.spec
 
 # Local env
 .venv/
@@ -18,6 +20,7 @@ extra_auth.json
 extra_auth_*.json
 hosts_870.yaml
 hosts_505.yaml
+.env.scheduler
 
 # Captured traffic and local debug
 *.har

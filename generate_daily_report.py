@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import dataclasses
+import html
 import json
 import logging
 import math
@@ -19,7 +20,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -27,9 +28,10 @@ import requests
 import yaml
 from dateutil import parser as date_parser
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
-from extra_auth import build_extra_auth_file, load_extra_auth
+from extra_auth import build_extra_auth_file, load_extra_auth, load_extra_auth_meta
 from extra_metrics_render import render_extra_metrics_block, render_payment_table_images
 from extra_metrics_service import ExtraMetricsService, ExtraSettings
+from feishu_doc import FeishuDocError, FeishuDocSettings, publish_report_to_feishu_doc
 from network_hosts import load_hosts_map, rewrite_url_with_hosts_map
 
 
@@ -233,6 +235,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Enable debug logging.",
     )
     parser.add_argument(
+        "--no-runtime-gui",
+        action="store_true",
+        help="Disable runtime tkinter prompt for cookie/date input.",
+    )
+    parser.add_argument(
         "--with-extra-metrics",
         action="store_true",
         help="Fetch extra metrics from fenxi/505 backends (optional).",
@@ -252,6 +259,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--build-extra-auth-only",
         action="store_true",
         help="Build extra auth JSON and exit without querying report data.",
+    )
+    parser.add_argument(
+        "--check-extra-auth",
+        action="store_true",
+        help="Only check fenxi/505 auth status and exit.",
+    )
+    parser.add_argument(
+        "--extra-auth-max-age-hours",
+        type=int,
+        default=24,
+        help="Warn when extra auth file is older than this hour threshold (default: 24).",
     )
     parser.add_argument(
         "--fenxi-har",
@@ -302,12 +320,68 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=None,
         help="Optional hosts YAML path for 870 requests.",
     )
+    parser.add_argument(
+        "--push-feishu-doc",
+        action="store_true",
+        help="Publish final report text to Feishu Doc.",
+    )
+    parser.add_argument(
+        "--no-push-feishu-doc",
+        action="store_true",
+        help="Disable Feishu doc publish for this run.",
+    )
+    parser.add_argument(
+        "--push-report-file",
+        type=Path,
+        default=None,
+        help="Publish an existing report text file to Feishu Doc and exit.",
+    )
+    parser.add_argument(
+        "--feishu-app-id",
+        type=str,
+        default=None,
+        help="Feishu app_id (overrides env/config).",
+    )
+    parser.add_argument(
+        "--feishu-app-secret",
+        type=str,
+        default=None,
+        help="Feishu app_secret (overrides env/config).",
+    )
+    parser.add_argument(
+        "--feishu-folder-token",
+        type=str,
+        default=None,
+        help="Feishu folder token for new docs (optional).",
+    )
+    parser.add_argument(
+        "--feishu-doc-title",
+        type=str,
+        default=None,
+        help="Custom Feishu doc title (optional).",
+    )
+    parser.add_argument(
+        "--feishu-doc-url-prefix",
+        type=str,
+        default=None,
+        help="Feishu doc URL prefix for output link (default: https://www.feishu.cn/docx/).",
+    )
+    parser.add_argument(
+        "--verify-feishu-content",
+        action="store_true",
+        help="Verify pushed Feishu doc content via docs/v1/content.",
+    )
     return parser.parse_args(argv)
 
 
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(name)s - %(message)s")
+
+
+def emit_progress(percent: int, message: str) -> None:
+    pct = max(0, min(100, int(percent)))
+    logging.info("[PROGRESS] %d|%s", pct, message)
 
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -515,6 +589,119 @@ def prepare_template_directory(template_dir: Path, template_name: str, default_c
         fallback_path,
     )
     return fallback_dir
+
+
+def _parse_iso_datetime(raw: str) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    candidate = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def get_extra_auth_age_hours(path: Path, meta: Dict[str, Any]) -> Optional[float]:
+    generated_at = _parse_iso_datetime(str(meta.get("generated_at") or ""))
+    if generated_at is None:
+        try:
+            generated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return None
+    now_utc = datetime.now(timezone.utc)
+    delta = now_utc - generated_at.astimezone(timezone.utc)
+    return max(0.0, delta.total_seconds() / 3600.0)
+
+
+def is_preflight_ok(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def should_push_feishu_doc(args: argparse.Namespace, config: Dict[str, Any]) -> bool:
+    feishu_cfg = config.get("feishu_doc") or {}
+    if not isinstance(feishu_cfg, dict):
+        raise ReportError("Config field feishu_doc must be a mapping when provided.")
+    if args.no_push_feishu_doc:
+        return False
+    if args.push_feishu_doc:
+        return True
+    if "enabled" in feishu_cfg:
+        return bool(feishu_cfg.get("enabled"))
+    # Default-on: publish to Feishu unless explicitly disabled.
+    return True
+
+
+def resolve_feishu_doc_settings(args: argparse.Namespace, config: Dict[str, Any]) -> FeishuDocSettings:
+    feishu_cfg = config.get("feishu_doc") or {}
+    if not isinstance(feishu_cfg, dict):
+        raise ReportError("Config field feishu_doc must be a mapping when provided.")
+
+    app_id = str(
+        args.feishu_app_id
+        or os.getenv("FEISHU_APP_ID")
+        or feishu_cfg.get("app_id")
+        or ""
+    ).strip()
+    app_secret = str(
+        args.feishu_app_secret
+        or os.getenv("FEISHU_APP_SECRET")
+        or feishu_cfg.get("app_secret")
+        or ""
+    ).strip()
+    if not app_id or not app_secret:
+        raise ReportError(
+            "飞书推送已启用，但缺少 app_id/app_secret。请通过 --feishu-app-id/--feishu-app-secret 或环境变量 FEISHU_APP_ID/FEISHU_APP_SECRET 提供。"
+        )
+
+    folder_token = str(
+        args.feishu_folder_token
+        or os.getenv("FEISHU_DOC_FOLDER_TOKEN")
+        or feishu_cfg.get("folder_token")
+        or ""
+    ).strip()
+    doc_url_prefix = str(
+        args.feishu_doc_url_prefix
+        or os.getenv("FEISHU_DOC_URL_PREFIX")
+        or feishu_cfg.get("doc_url_prefix")
+        or "https://www.feishu.cn/docx/"
+    ).strip()
+    timeout = int(feishu_cfg.get("timeout", 30))
+    verify_content = bool(args.verify_feishu_content or feishu_cfg.get("verify_content", False))
+    verify_lang = str(feishu_cfg.get("verify_content_lang", "zh")).strip() or "zh"
+    image_width = int(feishu_cfg.get("image_width", 960))
+    narrow_image_width = int(feishu_cfg.get("narrow_image_width", 760))
+    tall_ratio_threshold = float(feishu_cfg.get("tall_ratio_threshold", 1.9))
+    prevent_upscale_raw = feishu_cfg.get("prevent_upscale", True)
+    prevent_upscale = is_preflight_ok(prevent_upscale_raw)
+
+    return FeishuDocSettings(
+        app_id=app_id,
+        app_secret=app_secret,
+        folder_token=folder_token,
+        doc_url_prefix=doc_url_prefix,
+        timeout=timeout,
+        image_width=image_width,
+        narrow_image_width=narrow_image_width,
+        tall_ratio_threshold=tall_ratio_threshold,
+        prevent_upscale=prevent_upscale,
+        verify_content_after_publish=verify_content,
+        verify_content_lang=verify_lang,
+    )
+
+
+def resolve_feishu_doc_title(args: argparse.Namespace, config: Dict[str, Any]) -> Tuple[str, str]:
+    feishu_cfg = config.get("feishu_doc") or {}
+    if not isinstance(feishu_cfg, dict):
+        raise ReportError("Config field feishu_doc must be a mapping when provided.")
+    title_override = str(args.feishu_doc_title or feishu_cfg.get("title") or "").strip()
+    title_prefix = str(feishu_cfg.get("title_prefix") or "云游戏日报").strip() or "云游戏日报"
+    return title_override, title_prefix
 
 def configure_matplotlib_fonts() -> None:
     global _FONT_CONFIGURED  # pylint: disable=global-statement
@@ -1254,6 +1441,208 @@ def render_report(
     return output_path
 
 
+def _split_pipe_row(line: str) -> List[str]:
+    text = line.strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    return [cell.strip() for cell in text.split("|")]
+
+
+def _render_pipe_table_html(table_lines: Sequence[str]) -> str:
+    rows = [_split_pipe_row(line) for line in table_lines if line.strip()]
+    if not rows:
+        return ""
+    has_align = len(rows) > 1 and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in rows[1])
+    header = rows[0]
+    body = rows[2:] if has_align else rows[1:]
+    thead = "<thead><tr>%s</tr></thead>" % "".join(f"<th>{html.escape(cell)}</th>" for cell in header)
+    tbody = "<tbody>%s</tbody>" % "".join(
+        "<tr>%s</tr>" % "".join(f"<td>{html.escape(cell)}</td>" for cell in row)
+        for row in body
+    )
+    return f"<table class=\"md-table\">{thead}{tbody}</table>"
+
+
+def build_strict_template_markdown(
+    report_text: str,
+    chart_image_paths: Dict[str, str],
+    payment_images: Optional[Dict[str, str]] = None,
+) -> str:
+    text = report_text
+    refs: Dict[str, str] = {}
+    mapping = [
+        ("image1", "[总路线图片]", "total"),
+        ("image2", "[页游图片]", "page"),
+        ("image3", "[主机图片]", "console"),
+        ("image4", "[手游图片]", "mobile"),
+        ("image5", "[原神图片]", "genshin"),
+        ("image6", "[星铁图片]", "starrail"),
+        ("image7", "[绝区零图片]", "zzz"),
+        ("image8", "[高画质图片]", "high_quality"),
+        ("image9", "[pc云游戏图片]", "pc_cloud"),
+    ]
+    for image_key, marker, section_key in mapping:
+        image_path = str(chart_image_paths.get(section_key, "")).strip()
+        if not image_path:
+            continue
+        text = text.replace(marker, f"![][{image_key}]")
+        refs[image_key] = image_path
+
+    payment_images = payment_images or {}
+    lines = text.splitlines()
+    rebuilt: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("页游付费表图片："):
+            page_path = stripped.split("：", 1)[1].strip() or str(payment_images.get("page", "")).strip()
+            if page_path:
+                refs["image10"] = page_path
+                rebuilt.append("![][image10]")
+            else:
+                rebuilt.append(line)
+            continue
+        if stripped.startswith("手游付费表图片："):
+            mobile_path = stripped.split("：", 1)[1].strip() or str(payment_images.get("mobile", "")).strip()
+            if mobile_path:
+                refs["image11"] = mobile_path
+                rebuilt.append("![][image11]")
+            else:
+                rebuilt.append(line)
+            continue
+        rebuilt.append(line)
+
+    if refs:
+        rebuilt.append("")
+
+        def _ref_sort_key(key: str) -> int:
+            matched = re.search(r"(\d+)$", key)
+            return int(matched.group(1)) if matched else 10_000
+
+        for key in sorted(refs.keys(), key=_ref_sort_key):
+            rebuilt.append(f"[{key}]: {refs[key]}")
+    return "\n".join(rebuilt).rstrip() + "\n"
+
+
+def strict_template_markdown_to_html(markdown_text: str) -> str:
+    source_lines = markdown_text.replace("\r", "").split("\n")
+    refs: Dict[str, str] = {}
+    content_lines: List[str] = []
+    for line in source_lines:
+        matched = re.match(r"^\[([^\]]+)\]:\s*(.+)$", line.strip())
+        if matched:
+            refs[matched.group(1).strip()] = matched.group(2).strip()
+        else:
+            content_lines.append(line)
+
+    output: List[str] = []
+    idx = 0
+    while idx < len(content_lines):
+        line = content_lines[idx].rstrip()
+        stripped = line.strip()
+        if not stripped:
+            output.append('<div class="blank"></div>')
+            idx += 1
+            continue
+
+        image_match = re.match(r"^!\[\]\[([^\]]+)\]$", stripped)
+        if image_match:
+            key = image_match.group(1).strip()
+            image_src = refs.get(key, "")
+            if image_src:
+                output.append(
+                    "<div class=\"img-block\">"
+                    f"<img src=\"{html.escape(image_src)}\" alt=\"{html.escape(key)}\" />"
+                    f"<div class=\"img-cap\">[{html.escape(key)}]</div>"
+                    "</div>"
+                )
+            else:
+                output.append(f"<div class=\"img-miss\">[{html.escape(key)}]</div>")
+            idx += 1
+            continue
+
+        if re.fullmatch(r"[—-]{8,}", stripped):
+            output.append(f"<div class=\"sep\">{html.escape(stripped)}</div>")
+            idx += 1
+            continue
+
+        if stripped.startswith("|"):
+            table_lines = [line]
+            idx += 1
+            while idx < len(content_lines) and content_lines[idx].strip().startswith("|"):
+                table_lines.append(content_lines[idx])
+                idx += 1
+            output.append(_render_pipe_table_html(table_lines))
+            continue
+
+        if re.match(r"^\d{4}年\d+月\d+日游戏盒云游戏数据", stripped):
+            output.append(f"<h1>{html.escape(stripped)}</h1>")
+            idx += 1
+            continue
+
+        if re.match(r"^[一二三四五六七八九十]+、", stripped):
+            output.append(f"<h2>{html.escape(stripped)}</h2>")
+            idx += 1
+            continue
+
+        output.append(f"<p>{html.escape(stripped)}</p>")
+        idx += 1
+    return "\n".join(output)
+
+
+def render_strict_template_html(
+    report_path: Path,
+    chart_image_paths: Dict[str, str],
+    payment_images: Optional[Dict[str, str]] = None,
+) -> Path:
+    report_text = report_path.read_text(encoding="utf-8")
+    markdown_text = build_strict_template_markdown(
+        report_text=report_text,
+        chart_image_paths=chart_image_paths,
+        payment_images=payment_images,
+    )
+    body_html = strict_template_markdown_to_html(markdown_text)
+    output_path = report_path.with_suffix(".html")
+    html_doc = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>云游戏日报</title>
+  <style>
+    :root {{ --bg:#f5f6f8; --paper:#fff; --ink:#222; --line:#d8dce3; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; background:var(--bg); color:var(--ink); font-family:"PingFang SC","Microsoft YaHei",sans-serif; }}
+    .page {{ max-width:1000px; margin:18px auto; padding:0 12px; }}
+    .paper {{ background:var(--paper); border:1px solid var(--line); border-radius:8px; padding:18px 20px; }}
+    h1 {{ margin:0 0 8px; font-size:28px; }}
+    h2 {{ margin:8px 0 10px; font-size:20px; }}
+    p {{ margin:4px 0; line-height:1.75; font-size:15px; white-space:pre-wrap; }}
+    .sep {{ margin:8px 0; font-size:16px; letter-spacing:.5px; }}
+    .blank {{ height:10px; }}
+    .img-block {{ margin:8px 0 10px; overflow-x:auto; }}
+    .img-block img {{ max-width:none; width:auto; height:auto; display:block; border:1px solid #d0d6dd; border-radius:4px; background:#fafafa; min-height:40px; }}
+    .img-cap {{ font-size:12px; color:#6a7380; margin-top:3px; }}
+    .img-miss {{ margin:6px 0; padding:8px; border:1px dashed #c8ced8; color:#6a7380; font-size:13px; }}
+    .md-table {{ width:100%; border-collapse:collapse; margin:8px 0; font-size:14px; }}
+    .md-table th,.md-table td {{ border:1px solid #cfd5df; padding:6px 8px; text-align:center; }}
+    .md-table th {{ background:#eef2f7; }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="paper">
+{body_html}
+    </div>
+  </div>
+</body>
+</html>
+"""
+    output_path.write_text(html_doc, encoding="utf-8")
+    return output_path
+
+
 def render_pc_report(
     template_dir: Path,
     template_name: str,
@@ -1289,8 +1678,37 @@ def render_pc_report(
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     setup_logging(args.verbose)
+    emit_progress(2, "初始化参数")
 
     config = load_config(args.config)
+    emit_progress(5, "加载配置完成")
+    if args.push_report_file is not None:
+        report_file = Path(args.push_report_file)
+        if not report_file.exists():
+            raise ReportError(f"待推送报告文件不存在：{report_file}")
+        report_text = report_file.read_text(encoding="utf-8")
+        report_date_for_push = resolve_report_date(args.date)
+        emit_progress(20, "准备推送已有报告")
+        title_override, title_prefix = resolve_feishu_doc_title(args, config)
+        feishu_settings = resolve_feishu_doc_settings(args, config)
+        try:
+            emit_progress(85, "推送飞书文档中")
+            feishu_result = publish_report_to_feishu_doc(
+                settings=feishu_settings,
+                report_text=report_text,
+                report_date=report_date_for_push,
+                title_override=title_override,
+                title_prefix=title_prefix,
+                report_base_dir=report_file.parent,
+            )
+            logging.info("Feishu doc published: %s", feishu_result.get("url", ""))
+            if feishu_result.get("markdown_length"):
+                logging.info("Feishu doc markdown length: %s", feishu_result.get("markdown_length"))
+        except FeishuDocError as exc:
+            raise ReportError(f"飞书文档推送失败: {exc}") from exc
+        emit_progress(100, "推送完成")
+        return
+
     extra_metrics_cfg = config.get("extra_metrics") or {}
     extra_auth_file = args.extra_auth_file
     if str(extra_auth_file).strip() == "":
@@ -1309,6 +1727,46 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if args.build_extra_auth_only:
             return
 
+    if args.check_extra_auth:
+        emit_progress(20, "执行扩展登录态预检")
+        if not extra_auth_file.exists():
+            raise ReportError(f"扩展认证文件不存在：{extra_auth_file}")
+        extra_auth = load_extra_auth(extra_auth_file)
+        extra_auth_meta = load_extra_auth_meta(extra_auth_file)
+        report_date_for_check = resolve_report_date(args.date)
+        auth_age_hours = get_extra_auth_age_hours(extra_auth_file, extra_auth_meta)
+        if auth_age_hours is not None and auth_age_hours > float(args.extra_auth_max_age_hours):
+            logging.warning(
+                "扩展认证文件已超过%.1f小时（阈值=%d小时），建议重新手机验证码登录并刷新认证文件。",
+                auth_age_hours,
+                args.extra_auth_max_age_hours,
+            )
+        extra_settings = ExtraSettings(
+            timezone=str(extra_metrics_cfg.get("timezone", "Asia/Shanghai")),
+            request_timeout=int(extra_metrics_cfg.get("request_timeout", 30)),
+            query_proxy_url=str((args.query_proxy_url if args.query_proxy_url is not None else extra_metrics_cfg.get("query_proxy_url", ""))).strip(),
+            hosts_yaml_path=str((args.hosts_yaml_path if args.hosts_yaml_path is not None else extra_metrics_cfg.get("hosts_yaml_path", ""))).strip(),
+            query_debug_log_path=(DEFAULT_OUTPUT_DIR / "query_debug.jsonl"),
+            fenxi_base=str(extra_metrics_cfg.get("fenxi_base", "https://<FENXI_HOST>")).strip(),
+            manage_base=str(extra_metrics_cfg.get("manage_base", "http://<MANAGE_HOST>")).strip(),
+        )
+        preflight = asyncio.run(
+            ExtraMetricsService(extra_settings).preflight(
+                query_date=report_date_for_check,
+                fenxi_auth=extra_auth.get("fenxi"),
+                manage_auth=extra_auth.get("505"),
+            )
+        )
+        fenxi_ok = is_preflight_ok((preflight.get("fenxi") or {}).get("ok"))
+        manage_ok = is_preflight_ok((preflight.get("505") or {}).get("ok"))
+        logging.info("fenxi: %s", (preflight.get("fenxi") or {}).get("message", ""))
+        logging.info("505: %s", (preflight.get("505") or {}).get("message", ""))
+        if not (fenxi_ok and manage_ok):
+            raise ReportError("扩展登录态预检失败，请先完成手机验证码登录并刷新 extra_auth.json。")
+        logging.info("扩展登录态预检通过。")
+        emit_progress(100, "预检通过")
+        return
+
     base_url = config.get("base_url")
     if not base_url:
         raise ReportError("Config missing base_url.")
@@ -1319,15 +1777,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         or os.getenv("REPORT_PHPSESSID")
     )
     default_date_input = args.date
-    gui_cookie, gui_date = prompt_runtime_inputs(default_cookie_source, default_date_input)
-    if gui_cookie:
-        args.cookie = gui_cookie
-    if gui_date:
-        args.date = gui_date
+    if not args.no_runtime_gui:
+        gui_cookie, gui_date = prompt_runtime_inputs(default_cookie_source, default_date_input)
+        if gui_cookie:
+            args.cookie = gui_cookie
+        if gui_date:
+            args.date = gui_date
 
     report_date = resolve_report_date(args.date)
     date_cn = f"{report_date.year}年{report_date.month}月{report_date.day}日"
     cookie = resolve_cookie(args.cookie, config)
+    emit_progress(10, f"开始处理 {report_date.isoformat()} 数据")
     timeout = float(config.get("timeout", 30))
     network_cfg = config.get("network") or {}
     if not isinstance(network_cfg, dict):
@@ -1360,7 +1820,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     session.headers.update({"Cookie": cookie, "User-Agent": config.get("user_agent", "Mozilla/5.0")})
 
     results: Dict[str, TargetResult] = {}
-    for key in ordered_section_keys:
+    total_targets = max(1, len(ordered_section_keys))
+    for idx, key in enumerate(ordered_section_keys, start=1):
+        target_progress = 15 + int((idx - 1) * 45 / total_targets)
+        emit_progress(target_progress, f"抓取870数据：{key}")
         target_cfg = targets_config.get(key)
         if not target_cfg:
             logging.warning("Target %s is listed in order but missing configuration.", key)
@@ -1386,6 +1849,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             if generated:
                 result.chart_path = generated.relative_to(output_dir)
         results[key] = result
+    emit_progress(62, "870数据抓取完成")
 
     analysis_sentences: List[str] = []
     if config.get("analysis_groups"):
@@ -1395,12 +1859,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     extra_metrics_enabled = bool(args.with_extra_metrics or extra_metrics_cfg.get("enabled"))
     extra_metrics_block: Optional[str] = None
+    extra_payment_images: Dict[str, str] = {}
     if extra_metrics_enabled:
+        emit_progress(68, "执行分析后台与505预检/抓取")
         extra_metrics_data: Dict[str, Any] = {"notes": {}, "top_games": [], "warnings": [], "payment_tables": {}}
         if not extra_auth_file.exists():
             extra_metrics_data["warnings"].append(f"扩展认证文件不存在：{extra_auth_file}")
         else:
             extra_auth = load_extra_auth(extra_auth_file)
+            extra_auth_meta = load_extra_auth_meta(extra_auth_file)
+            auth_age_hours = get_extra_auth_age_hours(extra_auth_file, extra_auth_meta)
+            if auth_age_hours is not None and auth_age_hours > float(args.extra_auth_max_age_hours):
+                extra_metrics_data["warnings"].append(
+                    f"扩展认证文件已超过{auth_age_hours:.1f}小时（阈值={args.extra_auth_max_age_hours}小时），建议重新手机验证码登录并刷新认证文件。"
+                )
             hosts_yaml_path = (
                 args.hosts_yaml_path
                 if args.hosts_yaml_path is not None
@@ -1421,6 +1893,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 manage_base=str(extra_metrics_cfg.get("manage_base", "http://<MANAGE_HOST>")).strip(),
             )
             extra_service = ExtraMetricsService(extra_settings)
+            preflight = asyncio.run(
+                extra_service.preflight(
+                    query_date=report_date,
+                    fenxi_auth=extra_auth.get("fenxi"),
+                    manage_auth=extra_auth.get("505"),
+                )
+            )
+            fenxi_ok = is_preflight_ok((preflight.get("fenxi") or {}).get("ok"))
+            manage_ok = is_preflight_ok((preflight.get("505") or {}).get("ok"))
+            logging.info("fenxi: %s", (preflight.get("fenxi") or {}).get("message", ""))
+            logging.info("505: %s", (preflight.get("505") or {}).get("message", ""))
+            if not (fenxi_ok and manage_ok):
+                raise ReportError("扩展登录态预检失败，请先完成手机验证码登录并刷新 extra_auth.json。")
             try:
                 extra_metrics_data = asyncio.run(
                     extra_service.fetch(
@@ -1441,13 +1926,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                                 except ValueError:
                                     payment_images[key] = str(abs_path)
                             extra_metrics_data["payment_images"] = payment_images
+                            extra_payment_images = dict(payment_images)
                     except Exception as exc:  # pylint: disable=broad-except
                         extra_metrics_data.setdefault("warnings", []).append(f"505图表生成失败: {exc}")
                         logging.warning("Extra payment table image render failed: %s", exc)
             except Exception as exc:  # pylint: disable=broad-except
                 extra_metrics_data = {"notes": {}, "top_games": [], "warnings": [f"扩展指标请求失败: {exc}"], "payment_tables": {}}
                 logging.warning("Extra metrics fetch failed: %s", exc)
+        if not extra_payment_images:
+            fallback_payment_images = extra_metrics_data.get("payment_images")
+            if isinstance(fallback_payment_images, dict):
+                extra_payment_images = {
+                    str(key): str(value)
+                    for key, value in fallback_payment_images.items()
+                    if str(value).strip()
+                }
         extra_metrics_block = render_extra_metrics_block(extra_metrics_data)
+    emit_progress(80, "渲染日报内容")
 
     output_path = render_report(
         template_dir=args.template_dir,
@@ -1460,6 +1955,32 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         extra_metrics_block=extra_metrics_block,
     )
     logging.info("Report generated: %s", output_path)
+    chart_image_paths = {
+        key: str(result.chart_path)
+        for key, result in results.items()
+        if result.chart_path is not None
+    }
+    if should_push_feishu_doc(args, config):
+        emit_progress(90, "推送飞书文档")
+        title_override, title_prefix = resolve_feishu_doc_title(args, config)
+        feishu_settings = resolve_feishu_doc_settings(args, config)
+        try:
+            feishu_result = publish_report_to_feishu_doc(
+                settings=feishu_settings,
+                report_text=output_path.read_text(encoding="utf-8"),
+                report_date=report_date,
+                title_override=title_override,
+                title_prefix=title_prefix,
+                report_base_dir=output_path.parent,
+                chart_image_paths=chart_image_paths,
+                payment_images=extra_payment_images,
+            )
+            logging.info("Feishu doc published: %s", feishu_result.get("url", ""))
+            if feishu_result.get("markdown_length"):
+                logging.info("Feishu doc markdown length: %s", feishu_result.get("markdown_length"))
+        except FeishuDocError as exc:
+            raise ReportError(f"飞书文档推送失败: {exc}") from exc
+
     pc_target = results.get("pc_cloud")
     if pc_target:
         pc_report_path = render_pc_report(
@@ -1470,6 +1991,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             target=pc_target,
         )
         logging.info("PC cloud report generated: %s", pc_report_path)
+    emit_progress(100, "任务完成")
 
 
 if __name__ == "__main__":

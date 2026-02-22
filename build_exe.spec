@@ -8,7 +8,10 @@ def collect_datas():
     from PyInstaller.utils.hooks import collect_data_files
 
     datas = collect_data_files("matplotlib", include_py_files=False)
-    datas.append(("config.yaml", "."))
+    datas.append(("config.example.yaml", "."))
+    datas.append(("hosts_870.example.yaml", "."))
+    datas.append(("hosts_505.example.yaml", "."))
+    datas.append(("extra_auth.example.json", "."))
     datas.append(("requirements.txt", "."))
 
     template_root = "templates"

@@ -328,6 +328,55 @@ class ExtraMetricsService:
 
         return out
 
+    async def preflight(
+        self,
+        query_date: date,
+        fenxi_auth: dict[str, Any] | None,
+        manage_auth: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {
+            "fenxi": {"ok": False, "message": "未检查"},
+            "505": {"ok": False, "message": "未检查"},
+        }
+        if fenxi_auth:
+            try:
+                auth_headers = self._auth_headers(fenxi_auth)
+                async with httpx.AsyncClient(
+                    timeout=self.settings.request_timeout,
+                    follow_redirects=True,
+                    proxy=self.settings.query_proxy_url or None,
+                    trust_env=False,
+                ) as client:
+                    self._apply_auth(client, fenxi_auth)
+                    await self._fenxi_module_switch(client, auth_headers)
+                result["fenxi"] = {"ok": True, "message": "fenxi登录态可用"}
+            except Exception as exc:  # noqa: BLE001
+                result["fenxi"] = {"ok": False, "message": f"fenxi登录态不可用: {exc}"}
+        else:
+            result["fenxi"] = {"ok": False, "message": "fenxi认证信息缺失"}
+
+        if manage_auth:
+            try:
+                auth_headers = self._auth_headers(manage_auth)
+                hosts_map = load_hosts_map(self.settings.hosts_yaml_path)
+                async with httpx.AsyncClient(
+                    timeout=self.settings.request_timeout,
+                    follow_redirects=True,
+                    proxy=self.settings.query_proxy_url or None,
+                    trust_env=False,
+                ) as client:
+                    self._apply_auth(client, manage_auth)
+                    await self._bootstrap_callback(client, manage_auth, hosts_map)
+                    await self._manage_recharge_detail(client, hosts_map, "gz_web", query_date, auth_headers)
+                result["505"] = {"ok": True, "message": "505登录态可用"}
+            except Exception as exc:  # noqa: BLE001
+                result["505"] = {"ok": False, "message": f"505登录态不可用: {exc}"}
+        else:
+            result["505"] = {"ok": False, "message": "505认证信息缺失"}
+
+        self.debug_log.write({"event": "extra_auth_preflight", "query_date": query_date.isoformat(), "result": result})
+        return result
+
     async def _fetch_fenxi_metrics(self, query_date: date, auth: dict[str, Any]) -> dict[str, Any]:
         notes: dict[str, Any] = {}
         top_games: list[dict[str, Any]] = []
@@ -720,7 +769,15 @@ class ExtraMetricsService:
             ],
             "timeUnit": "datekey",
             "group_fields": ["`game_id`"],
-            "group_fields_detail": [],
+            "group_fields_detail": [
+                {
+                    "key": "`game_id`",
+                    "time_type": "LAST",
+                    "showName": "游戏ID",
+                    "bucketType": "DISCRETE",
+                    "field_name": "`game_id`",
+                }
+            ],
             "groupChineseName": {"indicator_value_0": "玩云游戏的人数（按设备）", "`game_id`": "游戏ID"},
             "globalFilter": [],
             "globalFilterRule": "",
@@ -775,11 +832,18 @@ class ExtraMetricsService:
 
     def _extract_top_games(self, payload: dict[str, Any], top_n: int = 10) -> list[dict[str, Any]]:
         rows = (((payload.get("data") or {}).get("table") or {}).get("records") or [])
-        out: list[dict[str, Any]] = []
-        for row in rows[:top_n]:
+        merged: dict[str, int] = {}
+        for row in rows:
             label = str(row.get("`game_id`_label") or "")
-            name = self._parse_game_name(label) if label else str(row.get("`game_id`") or "")
-            out.append({"name": name, "active_users": self._to_int(row.get("indicator_value_0"))})
+            raw_name = self._parse_game_name(label) if label else str(row.get("`game_id`") or "")
+            name = self._normalize_game_name(raw_name)
+            if not name:
+                continue
+            merged[name] = merged.get(name, 0) + self._to_int(row.get("indicator_value_0"))
+        sorted_items = sorted(merged.items(), key=lambda item: (-int(item[1]), str(item[0])))
+        out: list[dict[str, Any]] = []
+        for name, active_users in sorted_items[:top_n]:
+            out.append({"name": name, "active_users": int(active_users)})
         return out
 
     def _first_event_row(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -933,6 +997,22 @@ class ExtraMetricsService:
         if "(" in label and ")" in label:
             return label.split("(", 1)[1].rsplit(")", 1)[0]
         return label
+
+    def _normalize_game_name(self, name: str) -> str:
+        text = str(name or "").strip()
+        if not text:
+            return ""
+        # Remove bracketed channel/platform info, e.g. "(官服)", "(电脑页游)".
+        text = re.sub(r"[（(][^）)]*[）)]", "", text)
+        # Remove common suffixes, e.g. "-4.0版本", "－2.6版本", "-云游戏".
+        text = re.sub(r"[-－]\s*\d+(?:\.\d+)*\s*版本.*$", "", text)
+        text = re.sub(r"[-－]\s*云游戏.*$", "", text)
+        # For campaign/tag suffixes, keep the base game name before '-' (e.g. 第五人格-xxx -> 第五人格).
+        text = re.split(r"[-－]", text, maxsplit=1)[0]
+        # Collapse extra separators/spaces.
+        text = re.sub(r"\s+", "", text)
+        text = re.sub(r"[-－]+$", "", text)
+        return text.strip()
 
     def _apply_auth(self, client: httpx.AsyncClient, auth: dict[str, Any]) -> None:
         cookies = dict(auth.get("cookies", {}))

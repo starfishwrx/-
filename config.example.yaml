@@ -3,6 +3,8 @@
 
 # 870 data endpoint (replace with your own internal endpoint)
 base_url: "http://<YOUR_870_HOST>/?m=sdk&ac=getToolPre"
+# Optional: explicit 870 login page URL used by GUI launcher button
+login_url_870: "http://<YOUR_870_HOST>/?m=user&ac=login"
 
 # Local session cookie (do not commit real value)
 session_cookie: "PHPSESSID=<YOUR_SESSION_ID>"
@@ -142,3 +144,20 @@ extra_metrics:
     - "/path/to/fenxi_b.har"
   manage_hars:
     - "/path/to/manage_505.har"
+
+# Optional: publish final report txt to Feishu Doc
+feishu_doc:
+  enabled: false
+  app_id: ""
+  app_secret: ""
+  folder_token: ""
+  title: ""
+  title_prefix: "云游戏日报"
+  doc_url_prefix: "https://www.feishu.cn/docx/"
+  image_width: 960
+  narrow_image_width: 760
+  tall_ratio_threshold: 1.9
+  prevent_upscale: true
+  verify_content: false
+  verify_content_lang: "zh"
+  timeout: 30

@@ -45,13 +45,172 @@ cp extra_auth.example.json extra_auth.json
 - `extra_metrics.fenxi_base`: fenxi 基地址。
 - `extra_metrics.manage_base`: 505 基地址。
 - `extra_metrics.hosts_yaml_path`: 505 hosts 文件路径。
+- `feishu_doc.enabled`: 是否推送到飞书文档（不填时默认开启）。
+- `feishu_doc.app_id` / `feishu_doc.app_secret`: 飞书自建应用凭证（建议用环境变量提供）。
+- `feishu_doc.folder_token`: 文档创建目录（可选）。
+- `feishu_doc.image_width` / `feishu_doc.narrow_image_width`: 飞书图片展示宽度（默认 `960/760`）。
+- `feishu_doc.prevent_upscale`: 是否禁止小图放大（默认 `true`，推荐保持开启，避免变形）。
 
 ## 运行方式
+### GUI 启动器（推荐）
+你可以直接用桌面按钮运行，不需要命令行。
+
+macOS：
+```bash
+chmod +x scripts/start_gui.command
+./scripts/start_gui.command
+```
+
+Windows：
+- 双击 `scripts/start_gui.bat`
+
+启动器功能：
+- `打开870登录页`：一键打开 870 登录页，先登录再跑任务。
+- `立即启动任务`：立刻执行日报全流程（支持扩展数据与飞书推送）。
+- `任务进度条`：按主流程阶段实时更新进度。
+- `运行日志`：实时显示执行日志；成功后可点 `打开最新飞书文档`。
+- `定时任务面板`：可直接设置每天时间，并在 GUI 内完成 `安装/更新`、`立即触发`、`取消任务`。
+
+可选配置：
+- `config.yaml` 可增加 `login_url_870`，用于覆盖默认登录跳转地址。
+
+### 命令行
 生成完整日报（870 + 扩展 + 图表）：
 
 ```bash
 ./.venv/bin/python generate_daily_report.py --date 2026-02-20 --with-extra-metrics
 ```
+
+说明：`--with-extra-metrics` 现在会先做 fenxi/505 登录态预检，预检失败会直接中止，避免输出缺失扩展数据的“伪完整”日报。
+
+生成完整日报（默认会推送飞书文档）：
+
+```bash
+FEISHU_APP_ID="cli_xxx" \
+FEISHU_APP_SECRET="xxx" \
+./.venv/bin/python generate_daily_report.py --date 2026-02-20 --with-extra-metrics
+```
+
+可选参数：
+- `--no-push-feishu-doc`: 本次运行禁用飞书推送。
+- `--feishu-folder-token`: 指定飞书目录 token。
+- `--feishu-doc-title`: 指定文档标题（不传则按 `title_prefix_YYYYMMDD` 自动生成）。
+- `--feishu-doc-url-prefix`: 自定义结果链接前缀（默认 `https://www.feishu.cn/docx/`）。
+- `--verify-feishu-content`: 推送后调用 `docs/v1/content` 拉回 markdown 做内容校验（需权限 `docs:document.content:read`）。
+
+仅推送已有报告文件（快速验证，不重跑数据）：
+
+```bash
+FEISHU_APP_ID="cli_xxx" \
+FEISHU_APP_SECRET="xxx" \
+./.venv/bin/python generate_daily_report.py --push-report-file ./output/2026220_report.txt --date 2026-02-20
+```
+
+每日登录态建议流程（手机验证码登录后）：
+
+```bash
+# 1) 用最新 HAR 刷新扩展认证
+./.venv/bin/python generate_daily_report.py \
+  --build-extra-auth \
+  --fenxi-har "/path/to/fenxi.har" \
+  --manage-har "/path/to/manage.har"
+
+# 2) 只做扩展登录态预检（不跑870）
+./.venv/bin/python generate_daily_report.py --check-extra-auth --date 2026-02-20
+
+# 3) 预检通过后再跑正式日报
+./.venv/bin/python generate_daily_report.py --date 2026-02-20 --with-extra-metrics
+```
+
+也可以先一条命令刷新并预检：
+
+```bash
+./.venv/bin/python generate_daily_report.py \
+  --build-extra-auth \
+  --check-extra-auth \
+  --date 2026-02-20
+```
+
+`--extra-auth-max-age-hours` 可设置认证文件老化阈值（默认 24 小时）：
+
+```bash
+./.venv/bin/python generate_daily_report.py --check-extra-auth --extra-auth-max-age-hours 24
+```
+
+## 定时任务（稳定每日推送飞书）
+前提：你每天先完成一次手机验证码登录，刷新当天登录态（`session_cookie` + `extra_auth.json`）。
+
+### macOS（launchd）
+1. 准备调度环境变量：
+```bash
+cp .env.scheduler.example .env.scheduler
+```
+填入真实 `FEISHU_APP_ID/FEISHU_APP_SECRET`。
+
+2. 给脚本执行权限：
+```bash
+chmod +x scripts/run_daily_report.sh scripts/install_macos_launchd.sh
+```
+
+3. 安装每天定时任务（示例：每天 09:10）：
+```bash
+./scripts/install_macos_launchd.sh 9 10
+```
+
+4. 手动触发一次测试：
+```bash
+launchctl kickstart -k gui/$(id -u)/com.starfish.autodatareport.daily
+```
+
+日志位置：
+- `output/scheduler_logs/launchd_stdout.log`
+- `output/scheduler_logs/launchd_stderr.log`
+- `output/scheduler_logs/daily_*.log`
+
+### Windows（任务计划程序）
+1. 先手动验证一次脚本：
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_report.ps1 -DateMode today
+```
+
+2. 创建每日任务（示例：每天 09:10）：
+```powershell
+schtasks /Create /SC DAILY /TN "AutoDataReportDaily" /TR "powershell -ExecutionPolicy Bypass -File C:\path\to\autodatareport\scripts\run_daily_report.ps1 -DateMode today" /ST 09:10
+```
+
+3. 立即执行测试：
+```powershell
+schtasks /Run /TN "AutoDataReportDaily"
+```
+
+日志位置：
+- `output\scheduler_logs\daily_*.log`
+
+脚本特性（macOS/Windows）：
+- 自动做扩展登录态预检（失败直接终止，避免推送错误日报）。
+- 失败自动重试（默认 3 次，间隔 300 秒）。
+- 带运行日志，便于定位问题。
+- macOS 脚本带并发锁，避免重复触发时重入。
+
+## 打包分发（macOS 双版本）
+本项目当前提供两种 macOS 分发包：
+- `CLI`：命令行版（适合服务器/脚本调用）
+- `GUI`：桌面点击版（适合运营同学）
+
+一键构建：
+
+```bash
+chmod +x scripts/build_release_macos.sh
+./scripts/build_release_macos.sh
+```
+
+构建产物目录：
+- `dist/releases/<timestamp>/autodatareport-cli-macos.zip`
+- `dist/releases/<timestamp>/autodatareport-gui-macos.zip`
+
+说明：
+- 打包时只包含 `config.example.yaml`，不会打包本地 `config.yaml`、`extra_auth.json` 等敏感文件。
+- Windows `.exe` 需在 Windows 环境打包（保留 `build_exe.bat` 流程）。
 
 仅跑 870 主报告：
 
@@ -79,6 +238,7 @@ cp extra_auth.example.json extra_auth.json
 ## 常见问题
 - 870 返回登录页：`session_cookie` 失效，重新登录后更新 `config.yaml`。
 - fenxi/505 失败：检查 `extra_auth.json`、hosts 配置、是否需要重新抓 HAR。
+- 扩展登录态当天可用但次日失效：先手机验证码登录，再执行 `--build-extra-auth` + `--check-extra-auth`。
 - 无法弹 GUI：无图形环境是正常现象，脚本会自动跳过 GUI 输入框。
 
 ## 安全注意

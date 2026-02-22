@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote
@@ -139,6 +140,7 @@ def build_extra_auth_file(
         "meta": {
             "fenxi_hars": [str(p) for p in fenxi_paths],
             "manage_hars": [str(p) for p in manage_paths],
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         },
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,3 +182,11 @@ def load_extra_auth(path: Path) -> Dict[str, Dict[str, Any]]:
             "token": token,
         }
     return out
+
+
+def load_extra_auth_meta(path: Path) -> Dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    meta = data.get("meta")
+    if isinstance(meta, dict):
+        return meta
+    return {}

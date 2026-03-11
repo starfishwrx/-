@@ -1,0 +1,46 @@
+{
+  "fenxi": {
+    "cookies": {
+      "webanlytics2020pageinfo": "%7B%22isFirstTime%22%3Afalse%7D",
+      "webanlytics2020Utm": "%7B%22paraSourceChannel%22%3A%7B%7D%2C%22sourceChannel%22%3A%7B%7D%7D",
+      "e_uid": "3456944091",
+      "e_username": "uc_1625714176849",
+      "e_token": "UCeyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ2MS4wIiwiaWF0IjoxNzcxNjQzMjkwLCJzdWIiOiJVQ1Rva2VuIiwiaXNzIjoiVUM0Mzk5IiwidWlkIjoiMzQ1Njk0NDA5MSIsInVzZXJuYW1lIjoidWNfMTYyNTcxNDE3Njg0OSIsImV4cCI6MTc3MTgxNjA5MH0.VgSuV3Y9AUivGcWQwRiq3P0HRE7uEntexL9EZj7CM80",
+      "webanlytics2020userinfo": "%7B%22distinct_id%22%3A%22bd8bdc7ee7ba0e0f2b36c641458cb657%22%2C%22vid%22%3A%22bd8bdc7ee7ba0e0f2b36c641458cb657%22%2C%22uid%22%3A%223456944091%22%2C%22createTime%22%3A1766890182607%7D",
+      "JSESSIONID": "-l6MbDdM6tNNOvIBCJaLnPQWE2GdIxhRf1BmwrcY"
+    },
+    "headers": {
+      "mediaids": "media-eb40cb50d15a49a9",
+      "topic": "gamebox_event"
+    },
+    "token": "",
+    "bootstrap_url_template": ""
+  },
+  "505": {
+    "cookies": {
+      "hidden": "value",
+      "PHPSESSID": "11en4q8o6lkpq6jdtv7ijulcmq",
+      "__MANAGE_USER": "b21a97478218d98203d14bc418002e7f",
+      "__MANAGE_UID": "1538",
+      "__do_top_func_name_1538": "%E5%85%85%E5%80%BC%E4%B8%AD%E5%BF%83",
+      "__TOP_URL_ID": "25",
+      "__LEFT_URL_ID": "2239",
+      "__do_sec_func_name_1538": "%E6%B8%B8%E6%88%8F%E7%9B%92-%E4%BA%91%E6%B8%B8%E6%88%8F",
+      "__RTOP_URL_ID": "2141",
+      "__URL_ID_TF": "1"
+    },
+    "headers": {},
+    "token": "",
+    "bootstrap_url_template": ""
+  },
+  "meta": {
+    "fenxi_hars": [
+      "/Users/starfish/Downloads/fenxi.4399dev.com会员数据.har",
+      "/Users/starfish/Downloads/fenxi.4399dev.com活跃数据.har",
+      "/Users/starfish/Downloads/fenxi.4399dev.com新增数据.har"
+    ],
+    "manage_hars": [
+      "/Users/starfish/Downloads/manage.5054399.com页游手游充值.har"
+    ]
+  }
+}

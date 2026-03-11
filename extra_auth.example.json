@@ -18,5 +18,16 @@
     },
     "headers": {},
     "bootstrap_url": ""
+  },
+  "pc_web": {
+    "cookies": {
+      "PHPSESSID": "<REDACTED>"
+    },
+    "headers": {
+      "Bearer": "token=<REDACTED>&chain=0",
+      "Origin": "http://<YADMIN_HOST>",
+      "Referer": "http://<YADMIN_HOST>/"
+    },
+    "bootstrap_url": ""
   }
 }

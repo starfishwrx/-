@@ -1,16 +1,18 @@
 # 云游戏日报自动化工具（v1.0.1）
 
-统一生成 870 日报 + 分析后台（fenxi）扩展数据 + 505 付费表图片。
+统一生成 870 日报 + 分析后台（fenxi）扩展数据 + 505 付费表图片 + PC 网页端新增/活跃/Top10。
 
 ## 项目功能
 - 拉取 870 多条线路数据，输出总览日报与 PC 日报。
 - 自动计算并发峰值、排队峰值、排队时段，并生成趋势图。
 - 拉取 fenxi 扩展指标：新增、活跃、会员付费率、会员充值、会员数。
 - 拉取 505 付费数据并输出两张固定样式图片：页游对比表、手游双列榜单表。
+- 拉取 PC 网页端数据（`yapiadmin/yadmin`）：新增、活跃、活跃 Top10（去重）、会员指标（总金额/总订单数/首开会员总金额/首开会员数）。
 - 将以上内容整合到同一份日报文本里。
 
 ## 项目结构
 - `generate_daily_report.py`: 主入口（单命令跑完整日报）。
+- `fastapi_app.py`: FastAPI 服务入口（HTTP 调用任务）。
 - `extra_metrics_service.py`: fenxi/505 数据抓取与解析。
 - `extra_metrics_render.py`: 扩展文案渲染 + 505 图片渲染。
 - `extra_auth.py`: 从 HAR 构建并读取扩展认证信息。
@@ -45,9 +47,21 @@ cp extra_auth.example.json extra_auth.json
 - `extra_metrics.fenxi_base`: fenxi 基地址。
 - `extra_metrics.manage_base`: 505 基地址。
 - `extra_metrics.hosts_yaml_path`: 505 hosts 文件路径。
+- `pc_web_metrics.enabled`: 是否启用 PC 网页端新增/活跃/Top10。
+- `pc_web_metrics.base`: PC API 基地址（默认 `http://yapiadmin.4399.com`）。
+- `pc_web_metrics.web_origin`: PC 控制台来源域（默认 `http://yadmin.4399.com`）。
+- `pc_web_metrics.strict`: PC 链路失败是否中断（默认 `true`，推荐保持开启，避免输出不完整 PC 日报）。
+- `pc_web_metrics.auth_key`: `extra_auth.json` 中用于 PC 的认证键（默认 `pc_web`，PC 登录态独立，不再回退到 `505`）。
+- `pc_web_metrics.include_member_metrics`: 是否抓取 PC 会员指标（依赖 fenxi 登录态，默认 `true`）。
+- `pc_web_metrics.hosts_yaml_path`: PC 请求 hosts 文件路径（可与 505 共用）。
 - `feishu_doc.enabled`: 是否推送到飞书文档（不填时默认开启）。
+- `feishu_doc.pc_enabled`: 是否额外推送 PC 日报到飞书（默认 `true`）。
+- `feishu_doc.pc_title` / `feishu_doc.pc_title_prefix`: PC 飞书文档标题配置。
 - `feishu_doc.app_id` / `feishu_doc.app_secret`: 飞书自建应用凭证（建议用环境变量提供）。
 - `feishu_doc.folder_token`: 文档创建目录（可选）。
+- `feishu_doc.auto_share_tenant_members`: 创建后自动共享给租户全员（默认 `false`）。
+- `feishu_doc.auto_share_mode`: 自动共享权限，`read` 或 `edit`（默认 `read`）。
+- `feishu_doc.auto_share_strict`: 自动共享失败是否中断任务（默认 `false`）。
 - `feishu_doc.image_width` / `feishu_doc.narrow_image_width`: 飞书图片展示宽度（默认 `960/760`）。
 - `feishu_doc.prevent_upscale`: 是否禁止小图放大（默认 `true`，推荐保持开启，避免变形）。
 
@@ -98,6 +112,10 @@ FEISHU_APP_SECRET="xxx" \
 - `--feishu-doc-url-prefix`: 自定义结果链接前缀（默认 `https://www.feishu.cn/docx/`）。
 - `--verify-feishu-content`: 推送后调用 `docs/v1/content` 拉回 markdown 做内容校验（需权限 `docs:document.content:read`）。
 
+自动共享说明：
+- 开启 `feishu_doc.auto_share_tenant_members=true` 后，脚本会在创建文档后调用飞书权限接口设置“租户内可读/可编辑”。
+- 若接口权限不足，可先保持 `feishu_doc.auto_share_strict=false`，任务仍会完成并在日志打印 `Feishu share status: warn`。
+
 仅推送已有报告文件（快速验证，不重跑数据）：
 
 ```bash
@@ -106,27 +124,68 @@ FEISHU_APP_SECRET="xxx" \
 ./.venv/bin/python generate_daily_report.py --push-report-file ./output/2026220_report.txt --date 2026-02-20
 ```
 
+单独推送 PC 日报（图文）：
+
+```bash
+./.venv/bin/python generate_daily_report.py --push-report-file ./output/2026220_pc_report.txt --date 2026-02-20
+```
+
+说明：若报告中包含 `[pc云游戏图片]` 占位符，脚本会自动尝试读取 `output/charts/pc_cloud.png` 并上传到飞书。
+
 每日登录态建议流程（手机验证码登录后）：
 
 ```bash
-# 1) 用最新 HAR 刷新扩展认证
+# 1) 推荐：从本机浏览器自动刷新 fenxi + PC 登录态（无需HAR）
+./.venv/bin/python browser_auth_refresh.py \
+  --browser auto \
+  --extra-auth-file ./extra_auth.json \
+  --output ./extra_auth.json \
+  --hosts-yaml-path ./hosts_505.yaml
+
+# 若 auto 失败，可显式指定浏览器（含 arc / atlas）：
+# ./.venv/bin/python browser_auth_refresh.py --browser arc --extra-auth-file ./extra_auth.json --output ./extra_auth.json --hosts-yaml-path ./hosts_505.yaml
+# ./.venv/bin/python browser_auth_refresh.py --browser atlas --extra-auth-file ./extra_auth.json --output ./extra_auth.json --hosts-yaml-path ./hosts_505.yaml
+# 非标准安装路径可加：--cookie-file /path/to/Cookies --key-file /path/to/Local\\ State
+
+# 2) 如需连 505 一起更新，或自动刷新失败，再用 HAR 刷新扩展认证（fenxi/505/PC网页端）
 ./.venv/bin/python generate_daily_report.py \
   --build-extra-auth \
   --fenxi-har "/path/to/fenxi.har" \
-  --manage-har "/path/to/manage.har"
+  --manage-har "/path/to/manage.har" \
+  --pc-har "/path/to/yadmin_pc.har"
 
-# 2) 只做扩展登录态预检（不跑870）
+# 3) 只做扩展登录态预检（不跑870）
 ./.venv/bin/python generate_daily_report.py --check-extra-auth --date 2026-02-20
 
-# 3) 预检通过后再跑正式日报
+# 4) 预检通过后再跑正式日报
 ./.venv/bin/python generate_daily_report.py --date 2026-02-20 --with-extra-metrics
 ```
+
+预检日志会输出 `fenxi e_token` 的 `iat/exp/remaining_min`。若剩余时间低于 6 小时，会按不可用处理并直接失败，避免“跑到一半过期”。
+
+Playwright 自动登录修复（推荐配合 GUI 自动重试）：
+
+```bash
+# 首次使用需安装浏览器内核
+./.venv/bin/playwright install chromium
+
+# 失效时拉起登录页，弹窗输入手机号/验证码，自动回填 fenxi + pc_web 凭证
+./.venv/bin/python auth_recovery_playwright.py \
+  --extra-auth-file ./extra_auth.json \
+  --output ./extra_auth.json \
+  --ask-sms
+```
+
+说明：
+- 脚本会尝试自动切到“验证码登录”、勾选协议、点击“发送验证码”。
+- 若日志出现 `[AUTH] 未检测到发送验证码请求`，说明页面结构未匹配成功，请在浏览器页面手动点“发送验证码/登录”，脚本会继续等待并抓取登录态。
 
 也可以先一条命令刷新并预检：
 
 ```bash
 ./.venv/bin/python generate_daily_report.py \
   --build-extra-auth \
+  --pc-har "/path/to/yadmin_pc.har" \
   --check-extra-auth \
   --date 2026-02-20
 ```
@@ -136,6 +195,54 @@ FEISHU_APP_SECRET="xxx" \
 ```bash
 ./.venv/bin/python generate_daily_report.py --check-extra-auth --extra-auth-max-age-hours 24
 ```
+
+### FastAPI 服务版
+用于团队系统集成：通过 HTTP API 触发日报任务、查询进度和日志。
+
+启动（macOS/Linux）：
+
+```bash
+chmod +x scripts/start_api.sh
+./scripts/start_api.sh
+```
+
+启动（Windows）：
+- 双击 `scripts/start_api.bat`
+
+默认地址：
+- API: `http://127.0.0.1:8000`
+- Swagger: `http://127.0.0.1:8000/docs`
+
+鉴权（可选但推荐）：
+- 配置环境变量 `REPORT_API_TOKEN` 后，`/jobs*` 接口将强制校验请求头 `X-API-Token`。
+- 未配置 `REPORT_API_TOKEN` 时，默认不启用鉴权（便于本机调试）。
+
+核心接口：
+- `GET /health`: 健康检查。
+- `GET /meta/login-url-870`: 返回 870 登录页地址（从 `config.yaml` 解析）。
+- `POST /jobs/report`: 创建并启动日报任务。
+- `GET /jobs`: 查看任务列表。
+- `GET /jobs/{job_id}`: 查看单任务状态（含进度、飞书链接）。
+- `GET /jobs/{job_id}/logs?limit=300`: 查看任务日志。
+- `POST /jobs/{job_id}/cancel`: 取消运行中的任务。
+
+创建任务示例：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/jobs/report" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Token: <YOUR_TOKEN>" \
+  -d '{
+    "date": "2026-02-20",
+    "with_extra_metrics": true,
+    "verify_feishu_content": false,
+    "disable_feishu_push": false
+  }'
+```
+
+说明：
+- API 内置“单任务并发保护”，同一时刻只允许一个任务运行，避免登录态/文件冲突。
+- API 运行时会实时解析 `[PROGRESS]` 日志并回传进度。
 
 ## 定时任务（稳定每日推送飞书）
 前提：你每天先完成一次手机验证码登录，刷新当天登录态（`session_cookie` + `extra_auth.json`）。
@@ -239,7 +346,17 @@ chmod +x scripts/build_release_macos.sh
 - 870 返回登录页：`session_cookie` 失效，重新登录后更新 `config.yaml`。
 - fenxi/505 失败：检查 `extra_auth.json`、hosts 配置、是否需要重新抓 HAR。
 - 扩展登录态当天可用但次日失效：先手机验证码登录，再执行 `--build-extra-auth` + `--check-extra-auth`。
+- 浏览器自动刷新失败（`无法读取浏览器Cookie`）：先确认目标浏览器已登录，再显式指定 `--browser chrome|edge|chromium|brave|firefox|safari|arc|atlas`；非标准安装路径可加 `--cookie-file/--key-file`；仍失败时回退 HAR 刷新。
+- Atlas 提示 `Admin-Token` 加密无法读取：这是浏览器本地加密限制，直接使用 GUI 的 `上传PC HAR并更新`。
+- PC 返回 `status=-100, msg=请先登录`：优先检查 `extra_auth.json` 中 `pc_web.headers.Bearer` 是否存在；没有则重抓 `yadmin` HAR 并重新 `--build-extra-auth`。
+- fenxi 返回 401：检查预检日志里的 `e_token exp`（到期时间）并重新登录抓 HAR。
 - 无法弹 GUI：无图形环境是正常现象，脚本会自动跳过 GUI 输入框。
+
+GUI 登录态维护（`scripts/start_gui.command`）：
+- `自动刷新PC登录态`：调用 `browser_auth_refresh.py --pc-only`，默认按 atlas 浏览器刷新 `pc_web`。
+- `上传PC HAR并更新`：选择 yadmin/yapiadmin HAR 后只更新 `extra_auth.json` 的 pc_web 区块，不覆盖 `fenxi/505`。
+- `上传Fenxi HAR并更新`：选择 fenxi HAR 后只更新 `extra_auth.json` 的 fenxi 区块，不覆盖 `pc_web/505`。
+- 勾选 `登录态失败时自动修复并重试一次` 后：任务若命中登录态错误，会自动触发 `auth_recovery_playwright.py`（弹窗输入验证码）+ `--check-extra-auth`，通过后自动重试主任务一次。
 
 ## 安全注意
 - 不要提交这些本地敏感文件：`config.yaml`、`extra_auth.json`、`hosts_*.yaml`、`*.har`、`output/`。

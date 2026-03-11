@@ -5,6 +5,7 @@ from datetime import date
 import mimetypes
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +13,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 _TABLE_FONT_CONFIGURED = False
+_RETRYABLE_FEISHU_CODES = {1061001, 1061006, 1061045}
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_HTTP_ATTEMPTS = 4
 
 
 class FeishuDocError(RuntimeError):
@@ -35,6 +39,9 @@ class FeishuDocSettings:
     trim_padding: int = 4
     verify_content_after_publish: bool = False
     verify_content_lang: str = "zh"
+    auto_share_tenant_members: bool = False
+    auto_share_mode: str = "read"
+    auto_share_strict: bool = False
 
 
 def _safe_json(response: requests.Response) -> Dict[str, Any]:
@@ -47,6 +54,44 @@ def _safe_json(response: requests.Response) -> Dict[str, Any]:
     return payload
 
 
+def _is_retryable_request_exception(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.exceptions.SSLError,
+            requests.exceptions.ChunkedEncodingError,
+        ),
+    )
+
+
+def _retry_sleep(attempt: int) -> None:
+    # Short bounded backoff keeps UX responsive while masking transient network spikes.
+    delay = min(2.5, 0.5 * (2 ** max(0, attempt - 1)))
+    time.sleep(delay)
+
+
+def _request_with_retry(
+    *,
+    label: str,
+    sender,
+    max_attempts: int = _MAX_HTTP_ATTEMPTS,
+) -> requests.Response:
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return sender()
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not _is_retryable_request_exception(exc):
+                raise
+            _retry_sleep(attempt)
+    if last_exc is not None:
+        raise requests.RequestException(f"{label} failed after retries") from last_exc
+    raise requests.RequestException(f"{label} failed: unknown error")
+
+
 def _api_request(
     method: str,
     url: str,
@@ -55,30 +100,66 @@ def _api_request(
     params: Optional[Dict[str, Any]] = None,
     json_body: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    response = requests.request(
-        method=method.upper(),
-        url=url,
-        headers=headers,
-        params=params,
-        json=json_body,
-        timeout=timeout,
-    )
-    payload = _safe_json(response)
-    code = payload.get("code")
-    if code not in (0, "0"):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, _MAX_HTTP_ATTEMPTS + 1):
+        try:
+            response = _request_with_retry(
+                label=f"{method.upper()} {url}",
+                sender=lambda: requests.request(
+                    method=method.upper(),
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    json=json_body,
+                    timeout=timeout,
+                ),
+            )
+        except requests.RequestException as exc:
+            raise FeishuDocError(f"飞书接口请求失败: {exc}") from exc
+
+        if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_HTTP_ATTEMPTS:
+            _retry_sleep(attempt)
+            continue
+        try:
+            payload = _safe_json(response)
+        except FeishuDocError as exc:
+            last_error = exc
+            if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_HTTP_ATTEMPTS:
+                _retry_sleep(attempt)
+                continue
+            raise
+        code = payload.get("code")
+        if code in (0, "0"):
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                return {}
+            return data
         msg = payload.get("msg") or payload.get("message") or "unknown error"
-        raise FeishuDocError(f"飞书接口失败(code={code}): {msg}")
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return {}
-    return data
+        error = FeishuDocError(f"飞书接口失败(code={code}): {msg}")
+        last_error = error
+        retryable_code = False
+        try:
+            retryable_code = int(code) in _RETRYABLE_FEISHU_CODES
+        except (TypeError, ValueError):
+            retryable_code = False
+        if retryable_code and attempt < _MAX_HTTP_ATTEMPTS:
+            _retry_sleep(attempt)
+            continue
+        raise error
+
+    if last_error is not None:
+        raise last_error
+    raise FeishuDocError("飞书接口失败：未知错误")
 
 
 def _fetch_tenant_access_token(settings: FeishuDocSettings) -> str:
-    response = requests.post(
-        f"{settings.api_base.rstrip('/')}/open-apis/auth/v3/tenant_access_token/internal",
-        json={"app_id": settings.app_id, "app_secret": settings.app_secret},
-        timeout=settings.timeout,
+    response = _request_with_retry(
+        label="fetch tenant access token",
+        sender=lambda: requests.post(
+            f"{settings.api_base.rstrip('/')}/open-apis/auth/v3/tenant_access_token/internal",
+            json={"app_id": settings.app_id, "app_secret": settings.app_secret},
+            timeout=settings.timeout,
+        ),
     )
     payload = _safe_json(response)
     code = payload.get("code")
@@ -110,6 +191,52 @@ def _create_document(settings: FeishuDocSettings, token: str, title: str) -> str
     if not document_id:
         raise FeishuDocError("飞书文档创建失败：响应缺少 document_id")
     return document_id
+
+
+def _set_document_tenant_share(
+    settings: FeishuDocSettings,
+    token: str,
+    document_id: str,
+) -> str:
+    mode = str(settings.auto_share_mode or "read").strip().lower()
+    if mode not in {"read", "edit"}:
+        raise FeishuDocError(f"飞书自动共享模式不支持: {mode}")
+
+    if mode == "edit":
+        link_share_entity = "tenant_editable"
+        security_entity = "anyone_can_edit"
+        comment_entity = "anyone_can_edit"
+    else:
+        link_share_entity = "tenant_readable"
+        security_entity = "anyone_can_view"
+        comment_entity = "anyone_can_view"
+
+    body = {
+        "external_access": False,
+        "security_entity": security_entity,
+        "comment_entity": comment_entity,
+        "share_entity": "anyone",
+        "link_share_entity": link_share_entity,
+        "invite_external": False,
+    }
+    last_error: Optional[Exception] = None
+    # Feishu environments differ on `type` value (docx/doc); try both.
+    for doc_type in ("docx", "doc"):
+        try:
+            _api_request(
+                method="PATCH",
+                url=f"{settings.api_base.rstrip('/')}/open-apis/drive/v1/permissions/{document_id}/public",
+                timeout=settings.timeout,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"},
+                params={"type": doc_type},
+                json_body=body,
+            )
+            return link_share_entity
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+    if last_error is None:
+        raise FeishuDocError("飞书自动共享失败：未知错误")
+    raise FeishuDocError(f"飞书自动共享失败: {last_error}")
 
 
 def _list_blocks(settings: FeishuDocSettings, token: str, document_id: str) -> List[Dict[str, Any]]:
@@ -313,29 +440,60 @@ def _upload_image_token_for_block(
 ) -> str:
     if not image_path.exists():
         raise FeishuDocError(f"图片文件不存在：{image_path}")
-    with image_path.open("rb") as fh:
-        response = requests.post(
-            f"{settings.api_base.rstrip('/')}/open-apis/drive/v1/medias/upload_all",
-            headers={"Authorization": f"Bearer {token}"},
-            data={
-                "file_name": image_path.name,
-                "parent_type": "docx_image",
-                "parent_node": image_block_id,
-                "size": str(image_path.stat().st_size),
-                "extra": f'{{"drive_route_token":"{document_id}"}}',
-            },
-            files={"file": (image_path.name, fh, _guess_mime(image_path))},
-            timeout=settings.timeout,
-        )
-    payload = _safe_json(response)
-    code = payload.get("code")
-    if code not in (0, "0"):
+    file_size = image_path.stat().st_size
+    response: Optional[requests.Response] = None
+    request_error: Optional[Exception] = None
+    for attempt in range(1, _MAX_HTTP_ATTEMPTS + 1):
+        try:
+            with image_path.open("rb") as fh:
+                response = requests.post(
+                    f"{settings.api_base.rstrip('/')}/open-apis/drive/v1/medias/upload_all",
+                    headers={"Authorization": f"Bearer {token}"},
+                    data={
+                        "file_name": image_path.name,
+                        "parent_type": "docx_image",
+                        "parent_node": image_block_id,
+                        "size": str(file_size),
+                        "extra": f'{{"drive_route_token":"{document_id}"}}',
+                    },
+                    files={"file": (image_path.name, fh, _guess_mime(image_path))},
+                    timeout=settings.timeout,
+                )
+        except requests.RequestException as exc:
+            request_error = exc
+            if attempt >= _MAX_HTTP_ATTEMPTS or not _is_retryable_request_exception(exc):
+                raise FeishuDocError(f"飞书图片上传请求失败: {exc}") from exc
+            _retry_sleep(attempt)
+            continue
+
+        if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_HTTP_ATTEMPTS:
+            _retry_sleep(attempt)
+            continue
+
+        payload = _safe_json(response)
+        code = payload.get("code")
+        if code in (0, "0"):
+            token_value = str(((payload.get("data") or {}).get("file_token") or "")).strip()
+            if not token_value:
+                raise FeishuDocError("飞书图片上传失败：未返回 file_token")
+            return token_value
+
         msg = payload.get("msg") or payload.get("message") or "unknown error"
+        retryable_code = False
+        try:
+            retryable_code = int(code) in _RETRYABLE_FEISHU_CODES
+        except (TypeError, ValueError):
+            retryable_code = False
+        if retryable_code and attempt < _MAX_HTTP_ATTEMPTS:
+            _retry_sleep(attempt)
+            continue
         raise FeishuDocError(f"飞书图片上传失败(code={code}): {msg}")
-    token_value = str(((payload.get("data") or {}).get("file_token") or "")).strip()
-    if not token_value:
-        raise FeishuDocError("飞书图片上传失败：未返回 file_token")
-    return token_value
+
+    if response is None:
+        if request_error is not None:
+            raise FeishuDocError(f"飞书图片上传请求失败: {request_error}") from request_error
+        raise FeishuDocError("飞书图片上传失败：未获得响应")
+    raise FeishuDocError("飞书图片上传失败：重试耗尽")
 
 
 def _replace_image_for_block(
@@ -683,16 +841,19 @@ def _fetch_doc_markdown_content(
     token: str,
     document_id: str,
 ) -> str:
-    response = requests.get(
-        f"{settings.api_base.rstrip('/')}/open-apis/docs/v1/content",
-        headers={"Authorization": f"Bearer {token}"},
-        params={
-            "doc_token": document_id,
-            "doc_type": "docx",
-            "content_type": "markdown",
-            "lang": settings.verify_content_lang or "zh",
-        },
-        timeout=settings.timeout,
+    response = _request_with_retry(
+        label="fetch docs content",
+        sender=lambda: requests.get(
+            f"{settings.api_base.rstrip('/')}/open-apis/docs/v1/content",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "doc_token": document_id,
+                "doc_type": "docx",
+                "content_type": "markdown",
+                "lang": settings.verify_content_lang or "zh",
+            },
+            timeout=settings.timeout,
+        ),
     )
     payload = _safe_json(response)
     code = payload.get("code")
@@ -719,6 +880,15 @@ def publish_report_to_feishu_doc(
     token = _fetch_tenant_access_token(settings)
     title = _build_document_title(report_date=report_date, title_override=title_override, title_prefix=title_prefix)
     document_id = _create_document(settings=settings, token=token, title=title)
+    share_scope = ""
+    share_error = ""
+    if settings.auto_share_tenant_members:
+        try:
+            share_scope = _set_document_tenant_share(settings=settings, token=token, document_id=document_id)
+        except Exception as exc:  # noqa: BLE001
+            if settings.auto_share_strict:
+                raise
+            share_error = str(exc)
     blocks = _list_blocks(settings=settings, token=token, document_id=document_id)
     root_block_id = _resolve_root_block_id(document_id=document_id, blocks=blocks)
     base_dir = (report_base_dir or Path.cwd()).resolve()
@@ -802,4 +972,11 @@ def publish_report_to_feishu_doc(
     if settings.verify_content_after_publish:
         content = _fetch_doc_markdown_content(settings=settings, token=token, document_id=document_id)
         out["markdown_length"] = str(len(content))
+    if settings.auto_share_tenant_members:
+        if share_scope:
+            out["share_scope"] = share_scope
+            out["share_status"] = "ok"
+        else:
+            out["share_status"] = "warn"
+            out["share_error"] = share_error or "unknown error"
     return out

@@ -145,14 +145,34 @@ extra_metrics:
   manage_hars:
     - "/path/to/manage_505.har"
 
+pc_web_metrics:
+  enabled: false
+  strict: true
+  auth_key: "pc_web" # fallback: 505
+  include_member_metrics: true # from fenxi report 793
+  top_n: 10
+  base: "http://<YAPIADMIN_HOST>"
+  web_origin: "http://<YADMIN_HOST>"
+  request_timeout: 30
+  query_proxy_url: ""
+  hosts_yaml_path: "./hosts_505.yaml"
+  hars:
+    - "/path/to/yadmin_pc.har"
+
 # Optional: publish final report txt to Feishu Doc
 feishu_doc:
   enabled: false
+  pc_enabled: true
   app_id: ""
   app_secret: ""
   folder_token: ""
+  pc_title: ""
+  pc_title_prefix: "【PC日报】PC云游戏日报"
+  auto_share_tenant_members: false
+  auto_share_mode: "read"    # read/edit
+  auto_share_strict: false   # true 时自动共享失败会中断任务
   title: ""
-  title_prefix: "云游戏日报"
+  title_prefix: "【主日报】云游戏日报"
   doc_url_prefix: "https://www.feishu.cn/docx/"
   image_width: 960
   narrow_image_width: 760

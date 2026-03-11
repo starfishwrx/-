@@ -23,16 +23,23 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from zoneinfo import ZoneInfo
 
 import requests
 import yaml
 from dateutil import parser as date_parser
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
-from extra_auth import build_extra_auth_file, load_extra_auth, load_extra_auth_meta
+from extra_auth import (
+    build_extra_auth_file,
+    inspect_fenxi_token,
+    load_extra_auth,
+    load_extra_auth_meta,
+)
 from extra_metrics_render import render_extra_metrics_block, render_payment_table_images
 from extra_metrics_service import ExtraMetricsService, ExtraSettings
 from feishu_doc import FeishuDocError, FeishuDocSettings, publish_report_to_feishu_doc
 from network_hosts import load_hosts_map, rewrite_url_with_hosts_map
+from pc_web_metrics_service import PCWebMetricsService, PCWebSettings
 
 
 _FONT_CONFIGURED = False
@@ -248,7 +255,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--extra-auth-file",
         type=Path,
         default=DEFAULT_EXTRA_AUTH_FILE,
-        help="Path to extra auth JSON for fenxi/505.",
+        help="Path to extra auth JSON for fenxi/505/pc_web.",
     )
     parser.add_argument(
         "--build-extra-auth",
@@ -263,7 +270,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--check-extra-auth",
         action="store_true",
-        help="Only check fenxi/505 auth status and exit.",
+        help="Only check full auth status and exit (870 + fenxi/505, plus pc_web if enabled).",
     )
     parser.add_argument(
         "--extra-auth-max-age-hours",
@@ -282,6 +289,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="append",
         default=[],
         help="505/manage HAR file path. Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "--pc-har",
+        action="append",
+        default=[],
+        help="PC网页端 HAR file path (yadmin/yapiadmin). Can be specified multiple times.",
     )
     parser.add_argument(
         "--hosts-yaml-path",
@@ -494,6 +507,171 @@ def build_auto_query_params(
     return auto_params
 
 
+def select_870_preflight_query(config: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    targets_config = config.get("targets") or {}
+    if not isinstance(targets_config, dict) or not targets_config:
+        raise ReportError("Config missing targets definitions.")
+    ordered_section_keys = config.get("report_section_order") or list(targets_config.keys())
+    for key in ordered_section_keys:
+        target_cfg = targets_config.get(key)
+        if not isinstance(target_cfg, dict):
+            continue
+        queries = target_cfg.get("queries") or []
+        if not isinstance(queries, list):
+            continue
+        for query in queries:
+            if isinstance(query, dict) and isinstance(query.get("params"), dict):
+                return key, target_cfg, query
+    raise ReportError("870预检失败：未找到可用查询配置。")
+
+
+def preflight_870_auth(
+    config: Dict[str, Any],
+    args: argparse.Namespace,
+    report_date: date,
+) -> Dict[str, Any]:
+    base_url = str(config.get("base_url") or "").strip()
+    if not base_url:
+        return {"ok": False, "message": "870登录态不可用: Config missing base_url."}
+
+    try:
+        cookie = resolve_cookie(args.cookie, config)
+    except ReportError as exc:
+        return {"ok": False, "message": f"870登录态不可用: {exc}"}
+
+    timeout = float(config.get("timeout", 30))
+    default_http_method = str(config.get("default_http_method", "post") or "post")
+    auto_query_params = build_auto_query_params(config.get("auto_query_params"), report_date)
+    try:
+        target_key, target_cfg, query = select_870_preflight_query(config)
+    except ReportError as exc:
+        return {"ok": False, "message": f"870登录态不可用: {exc}"}
+
+    hosts_yaml_path_870 = (
+        args.network_hosts_yaml
+        if args.network_hosts_yaml is not None
+        else str((config.get("network") or {}).get("hosts_yaml_path") or "")
+    ).strip()
+    hosts_map_870 = load_hosts_map(hosts_yaml_path_870) if hosts_yaml_path_870 else {}
+
+    params = dict(auto_query_params)
+    params.update(query.get("params") or {})
+    method = str(query.get("method") or default_http_method).strip() or default_http_method
+
+    session = requests.Session()
+    try:
+        configure_870_session(session, args, config)
+        session.headers.update({"Cookie": cookie, "User-Agent": config.get("user_agent", "Mozilla/5.0")})
+        fetch_json(session, base_url, params, timeout, method, hosts_map=hosts_map_870)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": f"870登录态不可用: {exc}"}
+    finally:
+        session.close()
+
+    label = str(target_cfg.get("label") or target_key)
+    return {"ok": True, "message": f"870登录态可用: {label}"}
+
+
+def run_full_auth_preflight(
+    config: Dict[str, Any],
+    args: argparse.Namespace,
+    extra_metrics_cfg: Dict[str, Any],
+    extra_auth_file: Path,
+) -> None:
+    report_date_for_check = resolve_report_date(args.date)
+
+    auth_870 = preflight_870_auth(config, args, report_date_for_check)
+    logging.info("870: %s", auth_870.get("message", ""))
+    if not is_preflight_ok(auth_870.get("ok")):
+        raise ReportError(str(auth_870.get("message") or "870登录态预检失败"))
+
+    if not extra_auth_file.exists():
+        raise ReportError(f"扩展认证文件不存在：{extra_auth_file}")
+    extra_auth = load_extra_auth(extra_auth_file)
+    extra_auth_meta = load_extra_auth_meta(extra_auth_file)
+    timezone_name = str(extra_metrics_cfg.get("timezone", "Asia/Shanghai"))
+    fenxi_diag = diagnose_fenxi_token(extra_auth, timezone_name=timezone_name, warn_threshold_hours=6.0)
+    logging.info("fenxi_token: %s", fenxi_diag.get("message", ""))
+    auth_age_hours = get_extra_auth_age_hours(extra_auth_file, extra_auth_meta)
+    if auth_age_hours is not None and auth_age_hours > float(args.extra_auth_max_age_hours):
+        logging.warning(
+            "扩展认证文件已超过%.1f小时（阈值=%d小时），建议重新手机验证码登录并刷新认证文件。",
+            auth_age_hours,
+            args.extra_auth_max_age_hours,
+        )
+    extra_settings = ExtraSettings(
+        timezone=str(extra_metrics_cfg.get("timezone", "Asia/Shanghai")),
+        request_timeout=int(extra_metrics_cfg.get("request_timeout", 30)),
+        query_proxy_url=str((args.query_proxy_url if args.query_proxy_url is not None else extra_metrics_cfg.get("query_proxy_url", ""))).strip(),
+        hosts_yaml_path=str((args.hosts_yaml_path if args.hosts_yaml_path is not None else extra_metrics_cfg.get("hosts_yaml_path", ""))).strip(),
+        query_debug_log_path=(DEFAULT_OUTPUT_DIR / "query_debug.jsonl"),
+        fenxi_base=str(extra_metrics_cfg.get("fenxi_base", "https://<FENXI_HOST>")).strip(),
+        manage_base=str(extra_metrics_cfg.get("manage_base", "http://<MANAGE_HOST>")).strip(),
+    )
+    preflight = asyncio.run(
+        ExtraMetricsService(extra_settings).preflight(
+            query_date=report_date_for_check,
+            fenxi_auth=extra_auth.get("fenxi"),
+            manage_auth=extra_auth.get("505"),
+        )
+    )
+    fenxi_ok = is_preflight_ok((preflight.get("fenxi") or {}).get("ok"))
+    manage_ok = is_preflight_ok((preflight.get("505") or {}).get("ok"))
+    if not bool(fenxi_diag.get("usable")):
+        fenxi_ok = False
+    logging.info("fenxi: %s", (preflight.get("fenxi") or {}).get("message", ""))
+    logging.info("505: %s", (preflight.get("505") or {}).get("message", ""))
+    if not bool(fenxi_diag.get("usable")):
+        logging.error("fenxi token 预检失败: %s", fenxi_diag.get("message", ""))
+    if not (fenxi_ok and manage_ok):
+        raise ReportError("扩展登录态预检失败，请先完成手机验证码登录并刷新 extra_auth.json。")
+
+    pc_web_cfg = config.get("pc_web_metrics") or {}
+    if bool(pc_web_cfg.get("enabled")):
+        strict_mode = bool(pc_web_cfg.get("strict", True))
+        pc_auth_key = str(pc_web_cfg.get("auth_key", "pc_web")).strip() or "pc_web"
+        pc_auth = extra_auth.get(pc_auth_key) or extra_auth.get("pc_web")
+        pc_hosts_yaml_path = (
+            args.hosts_yaml_path
+            if args.hosts_yaml_path is not None
+            else str(pc_web_cfg.get("hosts_yaml_path") or extra_metrics_cfg.get("hosts_yaml_path", ""))
+        )
+        pc_query_proxy_url = (
+            args.query_proxy_url
+            if args.query_proxy_url is not None
+            else str(pc_web_cfg.get("query_proxy_url") or extra_metrics_cfg.get("query_proxy_url", ""))
+        )
+        pc_service = PCWebMetricsService(
+            PCWebSettings(
+                base_url=str(pc_web_cfg.get("base", "http://yapiadmin.4399.com")).strip(),
+                web_origin=str(pc_web_cfg.get("web_origin", "http://yadmin.4399.com")).strip(),
+                request_timeout=int(pc_web_cfg.get("request_timeout", extra_metrics_cfg.get("request_timeout", 30))),
+                query_proxy_url=pc_query_proxy_url.strip(),
+                hosts_yaml_path=str(pc_hosts_yaml_path).strip(),
+                fenxi_base=str(extra_metrics_cfg.get("fenxi_base", "https://fenxi.4399dev.com")).strip(),
+                timezone=str(extra_metrics_cfg.get("timezone", "Asia/Shanghai")),
+            )
+        )
+        pc_preflight = asyncio.run(pc_service.preflight(report_date_for_check, pc_auth))
+        pc_ok = bool((pc_preflight or {}).get("ok"))
+        pc_message = str((pc_preflight or {}).get("message") or "")
+        logging.info("pc_web: %s", pc_message)
+        if not pc_ok:
+            if strict_mode:
+                raise ReportError(f"PC网页端登录态预检失败: {pc_message}")
+            logging.warning("PC网页端预检未通过（strict=false，继续）: %s", pc_message)
+        if bool(pc_web_cfg.get("include_member_metrics", True)):
+            member_preflight = asyncio.run(pc_service.preflight_member(report_date_for_check, extra_auth.get("fenxi")))
+            member_ok = bool((member_preflight or {}).get("ok"))
+            member_msg = str((member_preflight or {}).get("message") or "")
+            logging.info("pc_member: %s", member_msg)
+            if not bool(fenxi_diag.get("usable")):
+                member_ok = False
+                member_msg = f"{member_msg}; {fenxi_diag.get('message', '')}".strip("; ")
+            if (not member_ok) and strict_mode:
+                raise ReportError(f"PC会员登录态预检失败: {member_msg}")
+
+
 def prompt_runtime_inputs(
     default_cookie: Optional[str],
     default_date: Optional[str],
@@ -617,6 +795,42 @@ def get_extra_auth_age_hours(path: Path, meta: Dict[str, Any]) -> Optional[float
     return max(0.0, delta.total_seconds() / 3600.0)
 
 
+def _format_dt_with_tz(dt: datetime, tz_name: str) -> str:
+    try:
+        local_tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        local_tz = timezone.utc
+    local_dt = dt.astimezone(local_tz)
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def diagnose_fenxi_token(
+    extra_auth: Dict[str, Dict[str, Any]],
+    timezone_name: str,
+    warn_threshold_hours: float = 6.0,
+) -> Dict[str, Any]:
+    diag = inspect_fenxi_token(
+        extra_auth.get("fenxi"),
+        warn_threshold_hours=warn_threshold_hours,
+    )
+    message = str(diag.get("reason") or "")
+    iat = diag.get("iat")
+    exp = diag.get("exp")
+    if isinstance(iat, datetime) and isinstance(exp, datetime):
+        message = (
+            f"{message}; iat={_format_dt_with_tz(iat, timezone_name)}; "
+            f"exp={_format_dt_with_tz(exp, timezone_name)}; "
+            f"remaining_min={float(diag.get('remaining_minutes') or 0):.1f}"
+        )
+    elif isinstance(exp, datetime):
+        message = (
+            f"{message}; exp={_format_dt_with_tz(exp, timezone_name)}; "
+            f"remaining_min={float(diag.get('remaining_minutes') or 0):.1f}"
+        )
+    diag["message"] = message
+    return diag
+
+
 def is_preflight_ok(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -679,6 +893,12 @@ def resolve_feishu_doc_settings(args: argparse.Namespace, config: Dict[str, Any]
     tall_ratio_threshold = float(feishu_cfg.get("tall_ratio_threshold", 1.9))
     prevent_upscale_raw = feishu_cfg.get("prevent_upscale", True)
     prevent_upscale = is_preflight_ok(prevent_upscale_raw)
+    auto_share_raw = feishu_cfg.get("auto_share_tenant_members", False)
+    auto_share_tenant_members = is_preflight_ok(auto_share_raw)
+    auto_share_mode = str(feishu_cfg.get("auto_share_mode", "read")).strip().lower() or "read"
+    if auto_share_mode not in {"read", "edit"}:
+        raise ReportError("feishu_doc.auto_share_mode must be read or edit.")
+    auto_share_strict = is_preflight_ok(feishu_cfg.get("auto_share_strict", False))
 
     return FeishuDocSettings(
         app_id=app_id,
@@ -692,6 +912,9 @@ def resolve_feishu_doc_settings(args: argparse.Namespace, config: Dict[str, Any]
         prevent_upscale=prevent_upscale,
         verify_content_after_publish=verify_content,
         verify_content_lang=verify_lang,
+        auto_share_tenant_members=auto_share_tenant_members,
+        auto_share_mode=auto_share_mode,
+        auto_share_strict=auto_share_strict,
     )
 
 
@@ -702,6 +925,63 @@ def resolve_feishu_doc_title(args: argparse.Namespace, config: Dict[str, Any]) -
     title_override = str(args.feishu_doc_title or feishu_cfg.get("title") or "").strip()
     title_prefix = str(feishu_cfg.get("title_prefix") or "云游戏日报").strip() or "云游戏日报"
     return title_override, title_prefix
+
+
+def should_push_feishu_pc_doc(config: Dict[str, Any]) -> bool:
+    feishu_cfg = config.get("feishu_doc") or {}
+    if not isinstance(feishu_cfg, dict):
+        raise ReportError("Config field feishu_doc must be a mapping when provided.")
+    if "pc_enabled" in feishu_cfg:
+        return bool(feishu_cfg.get("pc_enabled"))
+    return True
+
+
+def resolve_feishu_pc_doc_title(config: Dict[str, Any]) -> Tuple[str, str]:
+    feishu_cfg = config.get("feishu_doc") or {}
+    if not isinstance(feishu_cfg, dict):
+        raise ReportError("Config field feishu_doc must be a mapping when provided.")
+    title_override = str(feishu_cfg.get("pc_title") or "").strip()
+    title_prefix = str(feishu_cfg.get("pc_title_prefix") or "PC云游戏日报").strip() or "PC云游戏日报"
+    return title_override, title_prefix
+
+
+def is_pc_report_file(path: Path) -> bool:
+    return str(path.name).endswith("_pc_report.txt")
+
+
+def detect_chart_image_paths_for_push(report_file: Path, report_text: str) -> Dict[str, str]:
+    placeholder_map = {
+        "[总路线图片]": "total",
+        "[页游图片]": "page",
+        "[主机图片]": "console",
+        "[手游图片]": "mobile",
+        "[原神图片]": "genshin",
+        "[星铁图片]": "starrail",
+        "[绝区零图片]": "zzz",
+        "[高画质图片]": "high_quality",
+        "[pc云游戏图片]": "pc_cloud",
+    }
+    out: Dict[str, str] = {}
+    base_dir = report_file.parent
+    for marker, key in placeholder_map.items():
+        if marker not in report_text:
+            continue
+        candidates = [
+            base_dir / "charts" / f"{key}.png",
+            base_dir / f"{key}.png",
+        ]
+        chosen: Optional[Path] = None
+        for candidate in candidates:
+            if candidate.exists():
+                chosen = candidate
+                break
+        if chosen is None:
+            continue
+        try:
+            out[key] = str(chosen.relative_to(base_dir))
+        except ValueError:
+            out[key] = str(chosen)
+    return out
 
 def configure_matplotlib_fonts() -> None:
     global _FONT_CONFIGURED  # pylint: disable=global-statement
@@ -1649,6 +1929,7 @@ def render_pc_report(
     output_dir: Path,
     date_cn: str,
     target: TargetResult,
+    pc_web_metrics: Optional[Dict[str, Any]] = None,
 ) -> Path:
     template_dir = prepare_template_directory(template_dir, template_name, DEFAULT_PC_TEMPLATE_CONTENT)
     env = Environment(
@@ -1661,6 +1942,7 @@ def render_pc_report(
     output_text = template.render(
         report_date_cn=date_cn,
         target=target,
+        pc_web=pc_web_metrics or {"notes": {}, "top_games": [], "warnings": []},
     )
     sanitized_date = (
         date_cn.replace('年', '')
@@ -1689,7 +1971,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         report_text = report_file.read_text(encoding="utf-8")
         report_date_for_push = resolve_report_date(args.date)
         emit_progress(20, "准备推送已有报告")
-        title_override, title_prefix = resolve_feishu_doc_title(args, config)
+        if args.feishu_doc_title:
+            title_override, title_prefix = resolve_feishu_doc_title(args, config)
+        elif is_pc_report_file(report_file):
+            title_override, title_prefix = resolve_feishu_pc_doc_title(config)
+        else:
+            title_override, title_prefix = resolve_feishu_doc_title(args, config)
+        chart_image_paths = detect_chart_image_paths_for_push(report_file, report_text)
         feishu_settings = resolve_feishu_doc_settings(args, config)
         try:
             emit_progress(85, "推送飞书文档中")
@@ -1700,10 +1988,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 title_override=title_override,
                 title_prefix=title_prefix,
                 report_base_dir=report_file.parent,
+                chart_image_paths=chart_image_paths,
             )
             logging.info("Feishu doc published: %s", feishu_result.get("url", ""))
             if feishu_result.get("markdown_length"):
                 logging.info("Feishu doc markdown length: %s", feishu_result.get("markdown_length"))
+            if feishu_result.get("share_status"):
+                logging.info(
+                    "Feishu share status: %s scope=%s error=%s",
+                    feishu_result.get("share_status", ""),
+                    feishu_result.get("share_scope", ""),
+                    feishu_result.get("share_error", ""),
+                )
         except FeishuDocError as exc:
             raise ReportError(f"飞书文档推送失败: {exc}") from exc
         emit_progress(100, "推送完成")
@@ -1717,53 +2013,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.build_extra_auth:
         fenxi_hars = [Path(p) for p in (args.fenxi_har or extra_metrics_cfg.get("fenxi_hars") or [])]
         manage_hars = [Path(p) for p in (args.manage_har or extra_metrics_cfg.get("manage_hars") or [])]
-        if not fenxi_hars and not manage_hars:
-            raise ReportError("No HAR files provided. Use --fenxi-har/--manage-har or config extra_metrics.fenxi_hars/manage_hars.")
-        for har_path in [*fenxi_hars, *manage_hars]:
+        pc_metrics_cfg = config.get("pc_web_metrics") or {}
+        pc_hars = [Path(p) for p in (args.pc_har or pc_metrics_cfg.get("hars") or [])]
+        if not fenxi_hars and not manage_hars and not pc_hars:
+            raise ReportError("No HAR files provided. Use --fenxi-har/--manage-har/--pc-har or config extra_metrics/pc_web_metrics HAR paths.")
+        for har_path in [*fenxi_hars, *manage_hars, *pc_hars]:
             if not har_path.exists():
                 raise ReportError(f"HAR file not found: {har_path}")
-        build_extra_auth_file(fenxi_hars=fenxi_hars, manage_hars=manage_hars, output_path=extra_auth_file)
+        build_extra_auth_file(
+            fenxi_hars=fenxi_hars,
+            manage_hars=manage_hars,
+            pc_hars=pc_hars,
+            output_path=extra_auth_file,
+        )
         logging.info("Built extra auth file: %s", extra_auth_file)
         if args.build_extra_auth_only:
             return
 
     if args.check_extra_auth:
-        emit_progress(20, "执行扩展登录态预检")
-        if not extra_auth_file.exists():
-            raise ReportError(f"扩展认证文件不存在：{extra_auth_file}")
-        extra_auth = load_extra_auth(extra_auth_file)
-        extra_auth_meta = load_extra_auth_meta(extra_auth_file)
-        report_date_for_check = resolve_report_date(args.date)
-        auth_age_hours = get_extra_auth_age_hours(extra_auth_file, extra_auth_meta)
-        if auth_age_hours is not None and auth_age_hours > float(args.extra_auth_max_age_hours):
-            logging.warning(
-                "扩展认证文件已超过%.1f小时（阈值=%d小时），建议重新手机验证码登录并刷新认证文件。",
-                auth_age_hours,
-                args.extra_auth_max_age_hours,
-            )
-        extra_settings = ExtraSettings(
-            timezone=str(extra_metrics_cfg.get("timezone", "Asia/Shanghai")),
-            request_timeout=int(extra_metrics_cfg.get("request_timeout", 30)),
-            query_proxy_url=str((args.query_proxy_url if args.query_proxy_url is not None else extra_metrics_cfg.get("query_proxy_url", ""))).strip(),
-            hosts_yaml_path=str((args.hosts_yaml_path if args.hosts_yaml_path is not None else extra_metrics_cfg.get("hosts_yaml_path", ""))).strip(),
-            query_debug_log_path=(DEFAULT_OUTPUT_DIR / "query_debug.jsonl"),
-            fenxi_base=str(extra_metrics_cfg.get("fenxi_base", "https://<FENXI_HOST>")).strip(),
-            manage_base=str(extra_metrics_cfg.get("manage_base", "http://<MANAGE_HOST>")).strip(),
-        )
-        preflight = asyncio.run(
-            ExtraMetricsService(extra_settings).preflight(
-                query_date=report_date_for_check,
-                fenxi_auth=extra_auth.get("fenxi"),
-                manage_auth=extra_auth.get("505"),
-            )
-        )
-        fenxi_ok = is_preflight_ok((preflight.get("fenxi") or {}).get("ok"))
-        manage_ok = is_preflight_ok((preflight.get("505") or {}).get("ok"))
-        logging.info("fenxi: %s", (preflight.get("fenxi") or {}).get("message", ""))
-        logging.info("505: %s", (preflight.get("505") or {}).get("message", ""))
-        if not (fenxi_ok and manage_ok):
-            raise ReportError("扩展登录态预检失败，请先完成手机验证码登录并刷新 extra_auth.json。")
-        logging.info("扩展登录态预检通过。")
+        emit_progress(20, "执行全平台登录态预检")
+        run_full_auth_preflight(config, args, extra_metrics_cfg, extra_auth_file)
+        logging.info("全平台登录态预检通过。")
         emit_progress(100, "预检通过")
         return
 
@@ -1860,13 +2130,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     extra_metrics_enabled = bool(args.with_extra_metrics or extra_metrics_cfg.get("enabled"))
     extra_metrics_block: Optional[str] = None
     extra_payment_images: Dict[str, str] = {}
+    extra_auth_cache: Optional[Dict[str, Dict[str, Any]]] = None
+    fenxi_token_diag: Optional[Dict[str, Any]] = None
     if extra_metrics_enabled:
         emit_progress(68, "执行分析后台与505预检/抓取")
         extra_metrics_data: Dict[str, Any] = {"notes": {}, "top_games": [], "warnings": [], "payment_tables": {}}
         if not extra_auth_file.exists():
             extra_metrics_data["warnings"].append(f"扩展认证文件不存在：{extra_auth_file}")
         else:
-            extra_auth = load_extra_auth(extra_auth_file)
+            extra_auth_cache = load_extra_auth(extra_auth_file)
+            fenxi_token_diag = diagnose_fenxi_token(
+                extra_auth_cache,
+                timezone_name=str(extra_metrics_cfg.get("timezone", "Asia/Shanghai")),
+                warn_threshold_hours=6.0,
+            )
+            logging.info("fenxi_token: %s", fenxi_token_diag.get("message", ""))
             extra_auth_meta = load_extra_auth_meta(extra_auth_file)
             auth_age_hours = get_extra_auth_age_hours(extra_auth_file, extra_auth_meta)
             if auth_age_hours is not None and auth_age_hours > float(args.extra_auth_max_age_hours):
@@ -1896,22 +2174,26 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             preflight = asyncio.run(
                 extra_service.preflight(
                     query_date=report_date,
-                    fenxi_auth=extra_auth.get("fenxi"),
-                    manage_auth=extra_auth.get("505"),
+                    fenxi_auth=extra_auth_cache.get("fenxi"),
+                    manage_auth=extra_auth_cache.get("505"),
                 )
             )
             fenxi_ok = is_preflight_ok((preflight.get("fenxi") or {}).get("ok"))
             manage_ok = is_preflight_ok((preflight.get("505") or {}).get("ok"))
+            if fenxi_token_diag is not None and (not bool(fenxi_token_diag.get("usable"))):
+                fenxi_ok = False
             logging.info("fenxi: %s", (preflight.get("fenxi") or {}).get("message", ""))
             logging.info("505: %s", (preflight.get("505") or {}).get("message", ""))
+            if fenxi_token_diag is not None and (not bool(fenxi_token_diag.get("usable"))):
+                logging.error("fenxi token 预检失败: %s", fenxi_token_diag.get("message", ""))
             if not (fenxi_ok and manage_ok):
                 raise ReportError("扩展登录态预检失败，请先完成手机验证码登录并刷新 extra_auth.json。")
             try:
                 extra_metrics_data = asyncio.run(
                     extra_service.fetch(
                         query_date=report_date,
-                        fenxi_auth=extra_auth.get("fenxi"),
-                        manage_auth=extra_auth.get("505"),
+                        fenxi_auth=extra_auth_cache.get("fenxi"),
+                        manage_auth=extra_auth_cache.get("505"),
                     )
                 )
                 payment_tables = extra_metrics_data.get("payment_tables")
@@ -1960,10 +2242,118 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         for key, result in results.items()
         if result.chart_path is not None
     }
+
+    pc_web_metrics_cfg = config.get("pc_web_metrics") or {}
+    pc_web_metrics_data: Dict[str, Any] = {"notes": {}, "top_games": [], "warnings": []}
+    pc_web_metrics_enabled = bool(pc_web_metrics_cfg.get("enabled"))
+    if pc_web_metrics_enabled:
+        emit_progress(94, "抓取PC网页端新增/活跃/Top10")
+        strict_mode = bool(pc_web_metrics_cfg.get("strict", True))
+        if not extra_auth_file.exists():
+            msg = f"PC网页端认证文件不存在：{extra_auth_file}"
+            if strict_mode:
+                raise ReportError(msg)
+            pc_web_metrics_data["warnings"].append(msg)
+        else:
+            if extra_auth_cache is None:
+                extra_auth_cache = load_extra_auth(extra_auth_file)
+            auth_key = str(pc_web_metrics_cfg.get("auth_key", "pc_web")).strip() or "pc_web"
+            pc_auth = (
+                extra_auth_cache.get(auth_key)
+                or extra_auth_cache.get("pc_web")
+            )
+            if not pc_auth:
+                msg = f"PC网页端认证信息缺失（auth_key={auth_key}）"
+                if strict_mode:
+                    raise ReportError(msg)
+                pc_web_metrics_data["warnings"].append(msg)
+            else:
+                hosts_yaml_path = (
+                    args.hosts_yaml_path
+                    if args.hosts_yaml_path is not None
+                    else str(pc_web_metrics_cfg.get("hosts_yaml_path") or extra_metrics_cfg.get("hosts_yaml_path") or "")
+                )
+                query_proxy_url = (
+                    args.query_proxy_url
+                    if args.query_proxy_url is not None
+                    else str(pc_web_metrics_cfg.get("query_proxy_url") or extra_metrics_cfg.get("query_proxy_url") or "")
+                )
+                pc_service = PCWebMetricsService(
+                    PCWebSettings(
+                        base_url=str(pc_web_metrics_cfg.get("base", "http://yapiadmin.4399.com")).strip(),
+                        web_origin=str(pc_web_metrics_cfg.get("web_origin", "http://yadmin.4399.com")).strip(),
+                        request_timeout=int(pc_web_metrics_cfg.get("request_timeout", extra_metrics_cfg.get("request_timeout", timeout))),
+                        query_proxy_url=query_proxy_url.strip(),
+                        hosts_yaml_path=str(hosts_yaml_path).strip(),
+                        fenxi_base=str(extra_metrics_cfg.get("fenxi_base", "https://fenxi.4399dev.com")).strip(),
+                        timezone=str(extra_metrics_cfg.get("timezone", "Asia/Shanghai")),
+                    )
+                )
+                preflight = asyncio.run(pc_service.preflight(report_date, pc_auth))
+                preflight_ok = bool((preflight or {}).get("ok"))
+                preflight_msg = str((preflight or {}).get("message") or "")
+                logging.info("pc_web: %s", preflight_msg)
+                if not preflight_ok:
+                    if strict_mode:
+                        raise ReportError(preflight_msg or "PC网页端登录态预检失败")
+                    pc_web_metrics_data["warnings"].append(preflight_msg or "PC网页端登录态预检失败")
+                else:
+                    try:
+                        top_n = max(1, int(pc_web_metrics_cfg.get("top_n", 10)))
+                    except (TypeError, ValueError):
+                        top_n = 10
+                    try:
+                        pc_web_metrics_data = asyncio.run(
+                            pc_service.fetch(
+                                query_date=report_date,
+                                auth=pc_auth,
+                                top_n=top_n,
+                            )
+                        )
+                        if bool(pc_web_metrics_cfg.get("include_member_metrics", True)):
+                            if fenxi_token_diag is None and extra_auth_cache is not None:
+                                fenxi_token_diag = diagnose_fenxi_token(
+                                    extra_auth_cache,
+                                    timezone_name=str(extra_metrics_cfg.get("timezone", "Asia/Shanghai")),
+                                    warn_threshold_hours=6.0,
+                                )
+                                logging.info("fenxi_token: %s", fenxi_token_diag.get("message", ""))
+                            if fenxi_token_diag is not None and (not bool(fenxi_token_diag.get("usable"))):
+                                raise ReportError(f"PC会员登录态预检失败: {fenxi_token_diag.get('message', '')}")
+                            member_data = asyncio.run(
+                                pc_service.fetch_member_metrics(
+                                    query_date=report_date,
+                                    fenxi_auth=extra_auth_cache.get("fenxi"),
+                                )
+                            )
+                            member_notes = member_data.get("notes")
+                            if isinstance(member_notes, dict):
+                                pc_web_metrics_data.setdefault("notes", {}).update(member_notes)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        msg = f"PC网页端指标拉取失败: {exc}"
+                        if strict_mode:
+                            raise ReportError(msg) from exc
+                        pc_web_metrics_data["warnings"].append(msg)
+                        logging.warning(msg)
+
+    pc_report_path: Optional[Path] = None
+    pc_target = results.get("pc_cloud")
+    if pc_target:
+        pc_report_path = render_pc_report(
+            template_dir=args.template_dir,
+            template_name=DEFAULT_PC_TEMPLATE_NAME,
+            output_dir=output_dir,
+            date_cn=date_cn,
+            target=pc_target,
+            pc_web_metrics=pc_web_metrics_data,
+        )
+        logging.info("PC cloud report generated: %s", pc_report_path)
+
     if should_push_feishu_doc(args, config):
         emit_progress(90, "推送飞书文档")
         title_override, title_prefix = resolve_feishu_doc_title(args, config)
         feishu_settings = resolve_feishu_doc_settings(args, config)
+        push_errors: List[str] = []
         try:
             feishu_result = publish_report_to_feishu_doc(
                 settings=feishu_settings,
@@ -1978,19 +2368,46 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             logging.info("Feishu doc published: %s", feishu_result.get("url", ""))
             if feishu_result.get("markdown_length"):
                 logging.info("Feishu doc markdown length: %s", feishu_result.get("markdown_length"))
+            if feishu_result.get("share_status"):
+                logging.info(
+                    "Feishu share status: %s scope=%s error=%s",
+                    feishu_result.get("share_status", ""),
+                    feishu_result.get("share_scope", ""),
+                    feishu_result.get("share_error", ""),
+                )
         except FeishuDocError as exc:
-            raise ReportError(f"飞书文档推送失败: {exc}") from exc
+            push_errors.append(f"飞书文档推送失败: {exc}")
 
-    pc_target = results.get("pc_cloud")
-    if pc_target:
-        pc_report_path = render_pc_report(
-            template_dir=args.template_dir,
-            template_name=DEFAULT_PC_TEMPLATE_NAME,
-            output_dir=output_dir,
-            date_cn=date_cn,
-            target=pc_target,
-        )
-        logging.info("PC cloud report generated: %s", pc_report_path)
+        if pc_report_path is not None and should_push_feishu_pc_doc(config):
+            emit_progress(95, "推送PC飞书文档")
+            try:
+                pc_title_override, pc_title_prefix = resolve_feishu_pc_doc_title(config)
+                pc_chart_image_paths: Dict[str, str] = {}
+                if pc_target and pc_target.chart_path is not None:
+                    pc_chart_image_paths["pc_cloud"] = str(pc_target.chart_path)
+                pc_result = publish_report_to_feishu_doc(
+                    settings=feishu_settings,
+                    report_text=pc_report_path.read_text(encoding="utf-8"),
+                    report_date=report_date,
+                    title_override=pc_title_override,
+                    title_prefix=pc_title_prefix,
+                    report_base_dir=pc_report_path.parent,
+                    chart_image_paths=pc_chart_image_paths,
+                )
+                logging.info("Feishu PC doc published: %s", pc_result.get("url", ""))
+                if pc_result.get("markdown_length"):
+                    logging.info("Feishu PC doc markdown length: %s", pc_result.get("markdown_length"))
+                if pc_result.get("share_status"):
+                    logging.info(
+                        "Feishu PC doc share status: %s scope=%s error=%s",
+                        pc_result.get("share_status", ""),
+                        pc_result.get("share_scope", ""),
+                        pc_result.get("share_error", ""),
+                    )
+            except FeishuDocError as exc:
+                push_errors.append(f"PC飞书文档推送失败: {exc}")
+        if push_errors:
+            raise ReportError("；".join(push_errors))
     emit_progress(100, "任务完成")
 
 

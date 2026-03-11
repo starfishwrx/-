@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
@@ -58,6 +59,8 @@ FENXI_TOPIC = "gamebox_event"
 FENXI_COMPONENT_PAY_RATE = "124012e0_9fda_11ee_97d3_63552b12082d"
 FENXI_COMPONENT_MEMBER_RECHARGE = "2f106fb0_9fd9_11ee_97d3_63552b12082d"
 FENXI_COMPONENT_MEMBER_DAILY = "f2967120_8ff1_11ee_a5c5_d316c750b6d6"
+FENXI_COMPONENT_MEMBER_DAILY_V2 = "1f4be1f0_4a06_11ee_91f8_bbf1e2ea3cec"
+FENXI_COMPONENT_MEMBER_COUNT_V2 = "97479700_4a04_11ee_91f8_bbf1e2ea3cec"
 
 
 BI_PAYLOAD_PAY_RATE: dict[str, Any] = {
@@ -280,6 +283,144 @@ BI_PAYLOAD_MEMBER_DAILY: dict[str, Any] = {
     "fieldFilter": [],
 }
 
+BI_PAYLOAD_MEMBER_DAILY_V2: dict[str, Any] = {
+    "reportId": 656,
+    "componentId": FENXI_COMPONENT_MEMBER_DAILY_V2,
+    "modelId": 316,
+    "fieldList": [
+        {"showname": "日期", "nullDisplay": "-", "describe": "", "fieldId": "zjpfdm75018i", "uniqueId": "zjpfdm75018i", "dateCompare": None, "rawFieldId": "zjpfdm75018i", "role": "dimension"},
+        {"showname": "总金额", "nullDisplay": "null", "describe": "", "fieldId": "bq2uvv3owhlk", "uniqueId": "bq2uvv3owhlk", "dateCompare": None, "rawFieldId": "bq2uvv3owhlk", "role": "measure"},
+        {"showname": "总订单数", "nullDisplay": "null", "describe": "", "fieldId": "g41xqw2bbrw9", "uniqueId": "g41xqw2bbrw9", "dateCompare": None, "rawFieldId": "g41xqw2bbrw9", "role": "measure"},
+    ],
+    "orderBy": [],
+    "aggFunction": [
+        {"agg": "SUM", "fieldId": "bq2uvv3owhlk", "uniqueId": "bq2uvv3owhlk"},
+        {"agg": "SUM", "fieldId": "g41xqw2bbrw9", "uniqueId": "g41xqw2bbrw9"},
+    ],
+    "showDataFormat": [
+        {"fieldId": "bq2uvv3owhlk", "uniqueId": "bq2uvv3owhlk", "isThousand": True, "isPercent": False, "decimalDigits": 2},
+        {"fieldId": "g41xqw2bbrw9", "uniqueId": "g41xqw2bbrw9", "isThousand": True, "isPercent": False, "decimalDigits": 0},
+    ],
+    "showDateFormat": [
+        {"dateFormat": "yyyyMMdd", "fieldId": "zjpfdm75018i", "fillDate": True, "uniqueId": "zjpfdm75018i"}
+    ],
+    "componentType": "normal-chart-line",
+    "pageSize": 1000,
+    "page": 1,
+    "isCheckBigTable": False,
+    "componentTitle": "49-每日各类型云游戏会员订单金额、订单数",
+    "variables": [{"sourceType": "component"}, {"sourceType": "component"}],
+    "filter": {"logicalOperator": "AND", "conditions": []},
+    "fieldFilter": [
+        {
+            "fieldId": "lfczy9e3rzpd",
+            "dataType": "STRING",
+            "dateFormat": None,
+            "filterList": [{"operator": "NO_EQUAL", "value": ["总"]}],
+            "filterRule": "{0}",
+            "legal": True,
+            "__for": "dataFilter",
+        },
+        {
+            "fieldId": "zjpfdm75018i",
+            "dataType": "DATE",
+            "dateFormat": "yyyyMMdd",
+            "filterList": [
+                {
+                    "key": None,
+                    "value": [],
+                    "operator": "DURING",
+                    "dataType": None,
+                    "range": [-14, -1],
+                    "period": None,
+                    "timeType": "DYNAMIC",
+                    "role": None,
+                    "decimalDigits": None,
+                }
+            ],
+            "filterRule": "({0})",
+            "__for": "outter",
+        },
+        {
+            "fieldId": "lfczy9e3rzpd",
+            "dataType": "STRING",
+            "filterList": [
+                {
+                    "key": None,
+                    "value": ["月卡"],
+                    "operator": "EQUALS",
+                    "dataType": None,
+                    "range": None,
+                    "period": None,
+                    "timeType": None,
+                    "role": None,
+                    "decimalDigits": None,
+                }
+            ],
+            "filterRule": "({0})",
+            "__for": "inner",
+        },
+    ],
+    "legendFieldIds": [],
+}
+
+BI_PAYLOAD_MEMBER_COUNT_V2: dict[str, Any] = {
+    "reportId": 656,
+    "componentId": FENXI_COMPONENT_MEMBER_COUNT_V2,
+    "modelId": 315,
+    "fieldList": [
+        {"showname": "日期", "nullDisplay": "-", "describe": "", "fieldId": "fxlo87pe_bxk", "uniqueId": "fxlo87pe_bxk", "dateCompare": None, "rawFieldId": "fxlo87pe_bxk", "role": "dimension"},
+        {"showname": "49云游戏会员数", "nullDisplay": "null", "describe": "", "fieldId": "_kcr7vzxji88", "uniqueId": "_kcr7vzxji88{1}", "dateCompare": None, "rawFieldId": "_kcr7vzxji88", "role": "measure"},
+        {"showname": "首开49云游戏会员数", "nullDisplay": "null", "describe": "", "fieldId": "z_ftqnrrb2si", "uniqueId": "z_ftqnrrb2si{1}", "dateCompare": None, "rawFieldId": "z_ftqnrrb2si", "role": "measure"},
+    ],
+    "orderBy": [],
+    "aggFunction": [
+        {"agg": "SUM", "fieldId": "_kcr7vzxji88", "uniqueId": "_kcr7vzxji88{1}"},
+        {"agg": "SUM", "fieldId": "z_ftqnrrb2si", "uniqueId": "z_ftqnrrb2si{1}"},
+    ],
+    "showDataFormat": [
+        {"fieldId": "_kcr7vzxji88", "uniqueId": "_kcr7vzxji88{1}", "isThousand": True, "isPercent": False, "decimalDigits": 0},
+        {"fieldId": "z_ftqnrrb2si", "uniqueId": "z_ftqnrrb2si{1}", "isThousand": True, "isPercent": False, "decimalDigits": 0},
+    ],
+    "showDateFormat": [
+        {"dateFormat": "yyyyMMdd", "fieldId": "fxlo87pe_bxk", "fillDate": True, "uniqueId": "fxlo87pe_bxk"}
+    ],
+    "componentType": "normal-chart-line",
+    "pageSize": 1000,
+    "page": 1,
+    "isCheckBigTable": False,
+    "componentTitle": "有效期内49云游戏会员数、首开49云游戏会员数",
+    "variables": [
+        {
+            "showName": "datekeyPh",
+            "dateFormat": "yyyyMMdd",
+            "dataType": "DATE",
+            "type": "placeholder",
+            "key": "datekeyPh",
+            "impactPage": "ALL_PAGE",
+            "filterList": [
+                {
+                    "key": None,
+                    "value": [],
+                    "operator": "DURING",
+                    "dataType": None,
+                    "range": [-14, -1],
+                    "period": None,
+                    "timeType": "DYNAMIC",
+                    "role": None,
+                    "decimalDigits": None,
+                }
+            ],
+            "filterRule": "({0})",
+            "__for": "outter",
+            "sourceType": "component",
+        }
+    ],
+    "filter": {"logicalOperator": "AND", "conditions": []},
+    "fieldFilter": [],
+    "legendFieldIds": [],
+}
+
 
 class ExtraMetricsService:
     def __init__(self, settings: ExtraSettings) -> None:
@@ -412,28 +553,107 @@ class ExtraMetricsService:
                 )
 
             offset = self._date_offset(query_date)
-            pay_rate_payload = self._payload_pay_rate(offset)
-            member_recharge_payload = self._payload_member_recharge(offset)
-            member_daily_payload = self._payload_member_daily(offset)
+            member_notes_v2: dict[str, Any] = {}
+            member_daily_v2_data: dict[str, Any] = {"data": {"data": []}}
+            member_count_v2_data: dict[str, Any] = {"data": {"data": []}}
+            try:
+                member_daily_v2_data = await self._fenxi_render_data_with_retry(
+                    client,
+                    FENXI_COMPONENT_MEMBER_DAILY_V2,
+                    self._payload_member_daily_v2(offset),
+                    auth_headers,
+                    attempts=3,
+                    retry_delay=0.8,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.debug_log.write(
+                    {
+                        "event": "extra_fenxi_member_daily_v2_error",
+                        "error": f"{type(exc).__name__}: {exc!r}",
+                        "query_date": query_date.isoformat(),
+                    }
+                )
+            try:
+                member_count_v2_data = await self._fenxi_render_data_with_retry(
+                    client,
+                    FENXI_COMPONENT_MEMBER_COUNT_V2,
+                    self._payload_member_count_v2(offset),
+                    auth_headers,
+                    attempts=3,
+                    retry_delay=0.8,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.debug_log.write(
+                    {
+                        "event": "extra_fenxi_member_count_v2_error",
+                        "error": f"{type(exc).__name__}: {exc!r}",
+                        "query_date": query_date.isoformat(),
+                    }
+                )
 
-            pay_rate_data = await self._fenxi_render_data(client, FENXI_COMPONENT_PAY_RATE, pay_rate_payload, auth_headers)
-            member_recharge_data = await self._fenxi_render_data(client, FENXI_COMPONENT_MEMBER_RECHARGE, member_recharge_payload, auth_headers)
-            member_daily_data = await self._fenxi_render_data(client, FENXI_COMPONENT_MEMBER_DAILY, member_daily_payload, auth_headers)
+            member_notes_v2 = self._extract_member_notes_v2(
+                member_daily_payload=member_daily_v2_data,
+                member_count_payload=member_count_v2_data,
+                query_date=query_date,
+                active_users_value=((notes.get("active_users") or {}).get("value") if isinstance(notes.get("active_users"), dict) else None),
+            )
+            notes.update(member_notes_v2)
 
-            pay_rate_row = self._first_row(pay_rate_data)
-            recharge_row = self._first_row(member_recharge_data)
-            daily_row = self._find_date_row(member_daily_data, query_date)
+            # Authoritative member summary metrics use dedicated BI components.
+            # Note: pay-rate component is a rolling range aggregate, not single-day.
+            try:
+                pay_rate_data = await self._fenxi_render_data_with_retry(
+                    client,
+                    FENXI_COMPONENT_PAY_RATE,
+                    self._payload_pay_rate(offset),
+                    auth_headers,
+                    attempts=3,
+                    retry_delay=0.8,
+                )
+                pay_rate_row = self._first_row(pay_rate_data)
+                if pay_rate_row:
+                    notes["member_open_count"] = self._to_int(pay_rate_row.get("thvxagsslrbm"))
+                    notes["member_pay_rate"] = str(pay_rate_row.get("fl6dt6_kps8e") or "")
+            except Exception as exc:  # noqa: BLE001
+                self.debug_log.write(
+                    {
+                        "event": "extra_fenxi_member_pay_rate_error",
+                        "error": f"{type(exc).__name__}: {exc!r}",
+                        "query_date": query_date.isoformat(),
+                    }
+                )
 
-            if pay_rate_row:
-                notes["member_open_count"] = self._to_int(pay_rate_row.get("thvxagsslrbm"))
-                notes["member_pay_rate"] = str(pay_rate_row.get("fl6dt6_kps8e") or "")
-
-            if recharge_row:
-                notes["member_recharge_amount"] = self._to_int(recharge_row.get("2quuthxeb6el"))
-                notes["member_recharge_week_ratio"] = str(recharge_row.get("r717ar12dmx0") or "")
-
-            if daily_row:
-                notes["member_valid_count"] = self._to_int(daily_row.get("ngins6tydctq"))
+            try:
+                recharge_data = await self._fenxi_render_data_with_retry(
+                    client,
+                    FENXI_COMPONENT_MEMBER_RECHARGE,
+                    self._payload_member_recharge(offset),
+                    auth_headers,
+                    attempts=3,
+                    retry_delay=0.8,
+                )
+                recharge_row = self._first_row(recharge_data)
+                if recharge_row:
+                    notes["member_recharge_amount"] = self._to_int(recharge_row.get("2quuthxeb6el"))
+                    notes["member_recharge_week_ratio"] = str(recharge_row.get("r717ar12dmx0") or "")
+            except Exception as exc:  # noqa: BLE001
+                self.debug_log.write(
+                    {
+                        "event": "extra_fenxi_member_recharge_error",
+                        "error": f"{type(exc).__name__}: {exc!r}",
+                        "query_date": query_date.isoformat(),
+                    }
+                )
+            # Recharge component can occasionally fail transiently; fallback to daily series value.
+            if notes.get("member_recharge_amount") in (None, "", 0):
+                fallback_daily = self._find_date_row_by_field(
+                    ((member_daily_v2_data.get("data") or {}).get("data") or []),
+                    field_id="zjpfdm75018i",
+                    target_day_key=query_date.strftime("%Y%m%d"),
+                )
+                fallback_amount = self._to_int(self._row_value(fallback_daily or {}, "bq2uvv3owhlk"))
+                if fallback_amount > 0:
+                    notes["member_recharge_amount"] = fallback_amount
 
         return {"notes": notes, "top_games": top_games}
 
@@ -542,8 +762,44 @@ class ExtraMetricsService:
         if resp.status_code >= 400:
             raise RuntimeError(f"fenxi renderData failed component={component_id} status={resp.status_code}")
         body = resp.json()
+        code = int(body.get("code") or 0)
+        if code not in (0, 1):
+            msg = str(body.get("message") or body.get("msg") or "").strip()
+            raise RuntimeError(f"fenxi renderData failed component={component_id} code={code} msg={msg}")
         self.debug_log.write({"event": "extra_fenxi_render_ok", "component": component_id, "payload_vars": payload.get("variables", [])[:2]})
         return body
+
+    async def _fenxi_render_data_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        component_id: str,
+        payload: dict[str, Any],
+        auth_headers: dict[str, str],
+        attempts: int = 3,
+        retry_delay: float = 0.6,
+    ) -> dict[str, Any]:
+        last_exc: Exception | None = None
+        max_attempts = max(1, int(attempts))
+        for idx in range(max_attempts):
+            try:
+                return await self._fenxi_render_data(client, component_id, payload, auth_headers)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                self.debug_log.write(
+                    {
+                        "event": "extra_fenxi_render_retry",
+                        "component": component_id,
+                        "attempt": idx + 1,
+                        "max_attempts": max_attempts,
+                        "error": f"{type(exc).__name__}: {exc!r}",
+                    }
+                )
+                if idx < max_attempts - 1:
+                    await asyncio.sleep(max(0.0, retry_delay) * (idx + 1))
+                    continue
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"fenxi renderData failed component={component_id}")
 
     async def _bootstrap_callback(
         self,
@@ -822,6 +1078,80 @@ class ExtraMetricsService:
         payload["variables"][0]["filterList"][0]["range"] = [offset, offset]
         return payload
 
+    def _payload_member_daily_v2(self, offset: int) -> dict[str, Any]:
+        payload = deepcopy(BI_PAYLOAD_MEMBER_DAILY_V2)
+        date_filter = payload.get("fieldFilter")
+        if isinstance(date_filter, list):
+            for item in date_filter:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("fieldId") or "") != "zjpfdm75018i":
+                    continue
+                filters = item.get("filterList")
+                if isinstance(filters, list) and filters:
+                    first = filters[0]
+                    if isinstance(first, dict):
+                        first["range"] = [int(offset) - 13, int(offset)]
+        return payload
+
+    def _payload_member_count_v2(self, offset: int) -> dict[str, Any]:
+        payload = deepcopy(BI_PAYLOAD_MEMBER_COUNT_V2)
+        variables = payload.get("variables")
+        if isinstance(variables, list) and variables:
+            first_var = variables[0]
+            if isinstance(first_var, dict):
+                filters = first_var.get("filterList")
+                if isinstance(filters, list) and filters:
+                    first_filter = filters[0]
+                    if isinstance(first_filter, dict):
+                        first_filter["range"] = [int(offset) - 13, int(offset)]
+        return payload
+
+    def _extract_member_notes_v2(
+        self,
+        member_daily_payload: dict[str, Any],
+        member_count_payload: dict[str, Any],
+        query_date: date,
+        active_users_value: Any,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        day_key = query_date.strftime("%Y%m%d")
+        week_key = (query_date - timedelta(days=7)).strftime("%Y%m%d")
+
+        rows_daily = ((member_daily_payload.get("data") or {}).get("data") or [])
+        rows_count = ((member_count_payload.get("data") or {}).get("data") or [])
+
+        target_daily = self._find_date_row_by_field(rows_daily, field_id="zjpfdm75018i", target_day_key=day_key)
+        week_daily = self._find_date_row_by_field(rows_daily, field_id="zjpfdm75018i", target_day_key=week_key)
+
+        if target_daily:
+            amount_today = self._to_int(self._row_value(target_daily, "bq2uvv3owhlk"))
+            order_today = self._to_int(self._row_value(target_daily, "g41xqw2bbrw9"))
+            out["member_recharge_amount"] = amount_today
+            out["member_open_count"] = order_today
+
+            active_users = self._to_int(active_users_value)
+            if active_users > 0:
+                pay_rate = (float(order_today) / float(active_users)) * 100.0
+                out["member_pay_rate"] = f"{pay_rate:.2f}%"
+
+            if week_daily:
+                amount_week = self._to_int(self._row_value(week_daily, "bq2uvv3owhlk"))
+                if amount_week > 0:
+                    ratio = ((float(amount_today) - float(amount_week)) / float(amount_week)) * 100.0
+                    out["member_recharge_week_ratio"] = f"{ratio:+.2f}%"
+                elif amount_today == 0:
+                    out["member_recharge_week_ratio"] = "0.00%"
+
+        target_count = self._find_date_row_by_field(rows_count, field_id="fxlo87pe_bxk", target_day_key=day_key)
+        if target_count:
+            out["member_valid_count"] = self._to_int(self._row_value(target_count, "_kcr7vzxji88"))
+            # Prefer explicit "首开会员数" from new member-count component.
+            first_count = self._to_int(self._row_value(target_count, "z_ftqnrrb2si"))
+            if first_count > 0:
+                out["member_open_count"] = first_count
+        return out
+
     def _extract_compare_metric(self, day_payload: dict[str, Any], week_payload: dict[str, Any]) -> dict[str, Any]:
         day_row = self._first_event_row(day_payload)
         week_row = self._first_event_row(week_payload)
@@ -864,7 +1194,69 @@ class ExtraMetricsService:
                 continue
             if str(row.get("yewst5mvg2xk") or "") == key:
                 return row
+        if rows and isinstance(rows[-1], dict):
+            return rows[-1]
         return self._first_row(payload)
+
+    def _find_date_row_by_field(
+        self,
+        rows: Any,
+        field_id: str,
+        target_day_key: str,
+    ) -> dict[str, Any]:
+        if not isinstance(rows, list):
+            return {}
+        exact: dict[str, Any] = {}
+        best_le: dict[str, Any] = {}
+        best_le_key = ""
+        best_any: dict[str, Any] = {}
+        best_any_key = ""
+        nearest: dict[str, Any] = {}
+        nearest_delta: int | None = None
+        try:
+            target_int = int(target_day_key)
+        except ValueError:
+            target_int = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_key = self._row_value(row, field_id)
+            day_key = re.sub(r"\\D", "", str(raw_key or ""))
+            if not day_key:
+                continue
+            if (not best_any_key) or day_key > best_any_key:
+                best_any_key = day_key
+                best_any = row
+            if day_key == target_day_key:
+                exact = row
+            if day_key <= target_day_key and ((not best_le_key) or day_key > best_le_key):
+                best_le_key = day_key
+                best_le = row
+            try:
+                day_int = int(day_key)
+            except ValueError:
+                continue
+            delta = abs(day_int - target_int)
+            if nearest_delta is None or delta < nearest_delta:
+                nearest_delta = delta
+                nearest = row
+        if exact:
+            return exact
+        if best_le:
+            return best_le
+        if nearest:
+            return nearest
+        return best_any
+
+    def _row_value(self, row: dict[str, Any], field_id: str) -> Any:
+        if field_id in row:
+            return row.get(field_id)
+        prefix = str(field_id or "")
+        for k, v in row.items():
+            key = str(k or "")
+            if key == prefix or key.startswith(prefix + "{"):
+                return v
+        return None
 
     def _extract_game_amount_rows(self, html: str) -> list[dict[str, Any]]:
         rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, flags=re.IGNORECASE | re.DOTALL)

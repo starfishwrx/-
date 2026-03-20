@@ -40,6 +40,7 @@ from extra_metrics_service import ExtraMetricsService, ExtraSettings
 from feishu_doc import FeishuDocError, FeishuDocSettings, publish_report_to_feishu_doc
 from network_hosts import load_hosts_map, rewrite_url_with_hosts_map
 from pc_web_metrics_service import PCWebMetricsService, PCWebSettings
+from runtime_auth import get_runtime_session_cookie, resolve_runtime_auth_path
 
 
 _FONT_CONFIGURED = False
@@ -420,12 +421,15 @@ def resolve_report_date(date_arg: Optional[str]) -> date:
     return datetime.now().date()
 
 
-def resolve_cookie(cli_cookie: Optional[str], config: Dict[str, Any]) -> str:
+def resolve_cookie(cli_cookie: Optional[str], config: Dict[str, Any], config_path: Optional[Path] = None) -> str:
     if cli_cookie:
         return cli_cookie.strip()
-    cookie = config.get("session_cookie") or os.getenv("REPORT_PHPSESSID")
+    runtime_cookie = ""
+    if config_path is not None:
+        runtime_cookie = get_runtime_session_cookie(resolve_runtime_auth_path(config_path))
+    cookie = os.getenv("REPORT_PHPSESSID") or runtime_cookie or config.get("session_cookie")
     if not cookie:
-        raise ReportError("Session cookie missing. Provide --cookie or set session_cookie in config.")
+        raise ReportError("Session cookie missing. Provide --cookie, set REPORT_PHPSESSID, or refresh 870登录态。")
     return cookie.strip()
 
 
@@ -535,7 +539,7 @@ def preflight_870_auth(
         return {"ok": False, "message": "870登录态不可用: Config missing base_url."}
 
     try:
-        cookie = resolve_cookie(args.cookie, config)
+        cookie = resolve_cookie(args.cookie, config, getattr(args, "config", None))
     except ReportError as exc:
         return {"ok": False, "message": f"870登录态不可用: {exc}"}
 
@@ -2056,7 +2060,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     report_date = resolve_report_date(args.date)
     date_cn = f"{report_date.year}年{report_date.month}月{report_date.day}日"
-    cookie = resolve_cookie(args.cookie, config)
+    cookie = resolve_cookie(args.cookie, config, args.config)
     emit_progress(10, f"开始处理 {report_date.isoformat()} 数据")
     timeout = float(config.get("timeout", 30))
     network_cfg = config.get("network") or {}

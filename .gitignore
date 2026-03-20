@@ -16,6 +16,7 @@ autodatareport-gui.spec
 
 # Sensitive local config/auth
 config.yaml
+runtime_auth.yaml
 extra_auth.json
 extra_auth_*.json
 hosts_870.yaml

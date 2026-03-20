@@ -14,11 +14,17 @@ from typing import Dict, Optional
 from urllib.parse import urlparse
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import yaml
 from fenxi_auth_from_har import refresh_fenxi_auth_from_hars
 from pc_auth_from_har import refresh_pc_auth_from_hars
+from runtime_auth import (
+    get_runtime_session_cookie,
+    normalize_870_session_cookie,
+    resolve_runtime_auth_path,
+    save_runtime_session_cookie,
+)
 
 
 PROGRESS_RE = re.compile(r"\[PROGRESS\]\s*(\d{1,3})\|(.+)")
@@ -96,6 +102,9 @@ class ReportLauncherApp:
 
     def _extra_auth_path(self) -> Path:
         return self.project_root / "extra_auth.json"
+
+    def _runtime_auth_path(self) -> Path:
+        return resolve_runtime_auth_path(self.config_path)
 
     def _configure_style(self) -> None:
         self.root.configure(bg="#E8EEF3")
@@ -254,10 +263,11 @@ class ReportLauncherApp:
 
         auth_bar = ttk.Frame(parent, style="Card.TFrame")
         auth_bar.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(auth_bar, text="自动刷新PC登录态", style="Ghost.TButton", command=self.refresh_pc_auth).pack(side=tk.LEFT)
+        ttk.Button(auth_bar, text="刷新870登录态", style="Ghost.TButton", command=self.refresh_870_auth).pack(side=tk.LEFT)
+        ttk.Button(auth_bar, text="自动刷新PC登录态", style="Ghost.TButton", command=self.refresh_pc_auth).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(auth_bar, text="上传PC HAR并更新", style="Ghost.TButton", command=self.import_pc_har).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(auth_bar, text="上传Fenxi HAR并更新", style="Ghost.TButton", command=self.import_fenxi_har).pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Label(auth_bar, text="登录态维护：PC自动刷新/PC HAR导入/Fenxi HAR导入", style="Muted.TLabel").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(auth_bar, text="登录态维护：870手动刷新/PC自动刷新/PC HAR导入/Fenxi HAR导入", style="Muted.TLabel").pack(side=tk.LEFT, padx=(12, 0))
 
     def _build_progress(self, parent: ttk.Frame) -> None:
         title_row = ttk.Frame(parent, style="Card.TFrame")
@@ -729,6 +739,33 @@ class ReportLauncherApp:
         if not path:
             path = str(self.project_root / "hosts_505.yaml")
         return path
+
+    def refresh_870_auth(self) -> None:
+        if not self._prepare_har_update("刷新870登录态"):
+            return
+        runtime_auth_path = self._runtime_auth_path()
+        current_cookie = get_runtime_session_cookie(runtime_auth_path)
+        if not current_cookie:
+            current_cookie = str(self._load_config().get("session_cookie") or "").strip()
+        initial_value = current_cookie.split("=", 1)[1] if current_cookie.startswith("PHPSESSID=") else current_cookie
+        raw_value = simpledialog.askstring(
+            "刷新870登录态",
+            "请先在浏览器完成870登录，再粘贴 PHPSESSID。\n支持：session 值、PHPSESSID=...、或包含 PHPSESSID 的完整 Cookie 字符串。",
+            initialvalue=initial_value,
+            parent=self.root,
+        )
+        if raw_value is None:
+            return
+        try:
+            normalized = normalize_870_session_cookie(raw_value)
+            saved_path = save_runtime_session_cookie(runtime_auth_path, normalized)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("更新失败", str(exc))
+            return
+        self.status_text.set("870登录态已更新")
+        self._append_log(f"[GUI] 870登录态已更新: {saved_path}")
+        self._append_log("[GUI] 后续预检和主流程会优先读取 runtime_auth.yaml 中的 PHPSESSID")
+        messagebox.showinfo("更新成功", f"870登录态已保存到：\n{saved_path}")
 
     def refresh_pc_auth(self) -> None:
         if not self.browser_auth_script.exists():
